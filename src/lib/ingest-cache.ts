@@ -32,7 +32,20 @@ function cachePath(projectPath: string): string {
 async function loadCache(projectPath: string): Promise<CacheData> {
   try {
     const raw = await readFile(cachePath(projectPath))
-    return JSON.parse(raw) as CacheData
+    const parsed = JSON.parse(raw) as Partial<CacheData> | null
+    // Older cleanup flows and manually reset projects may leave `{}` here.
+    // Treat a missing or malformed entries map as an empty cache instead of
+    // crashing every ingest while indexing cache.entries[sourceIdentity].
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      !parsed.entries ||
+      typeof parsed.entries !== "object" ||
+      Array.isArray(parsed.entries)
+    ) {
+      return { entries: {} }
+    }
+    return { entries: parsed.entries }
   } catch {
     return { entries: {} }
   }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "优质资料收集与知识库导入"
+  short_description: "先展示搜索候选并经用户确认，再获取、溯源并安全导入资料"
+  default_prompt: "使用 $collect-best-sources 搜索主题资料，先把带编号的候选结果交给我确认，再只收集并导入我批准的来源。"

@@ -42,6 +42,12 @@ import type { MultimodalConfig } from "@/stores/wiki-store"
 import { GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { computeContextBudget } from "@/lib/context-budget"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
+import { repositoryCapsuleDirective } from "@/lib/repository-capsule-policy"
+import {
+  buildUniqueIngestPathRedirects,
+  repairIngestReferences,
+  validateAndRepairSourceSummaryMetadata,
+} from "@/lib/ingest-integrity"
 
 const LONG_SOURCE_MIN_BUDGET = 8_000
 const LONG_SOURCE_MAX_SINGLE_PASS_BUDGET = 300_000
@@ -1120,6 +1126,7 @@ async function autoIngestImpl(
     signal,
     activityId,
     onFileWritten,
+    sourceContent,
   )
   throwIfIngestAborted(signal, activityId)
   const writtenPaths = writeResult.writtenPaths
@@ -1195,6 +1202,7 @@ async function autoIngestImpl(
           signal,
           activityId,
           onFileWritten,
+          sourceContent,
         )
         // Match successful writes against the paths requested from the model,
         // not the final on-disk paths. writeFileBlocks may legitimately rewrite
@@ -1441,6 +1449,45 @@ function extractGeneratedPageTitle(content: string): string | null {
   if (typeof title === "string" && title.trim()) return title.trim()
   const heading = content.match(/^#\s+(.+)$/m)?.[1]?.trim()
   return heading || null
+}
+
+function extractRawSourceTitle(content: string): string | null {
+  const title = parseFrontmatter(content).frontmatter?.title
+  if (typeof title === "string" && title.trim()) return title.trim()
+  const jinaTitle = content.match(/^Title:\s*(.+)$/im)?.[1]?.trim()
+  if (jinaTitle) return jinaTitle
+  return content.match(/^#\s+(.+)$/m)?.[1]?.trim() || null
+}
+
+function flattenMarkdownPaths(nodes: readonly FileNode[]): string[] {
+  const paths: string[] = []
+  const walk = (items: readonly FileNode[]): void => {
+    for (const item of items) {
+      if (item.is_dir) {
+        if (item.children) walk(item.children)
+      } else if (item.name.toLowerCase().endsWith(".md")) {
+        paths.push(item.path)
+      }
+    }
+  }
+  walk(nodes)
+  return paths
+}
+
+async function existingWikiReferences(projectPath: string): Promise<string[]> {
+  try {
+    const pp = normalizePath(projectPath).replace(/\/+$/, "")
+    const paths = flattenMarkdownPaths(await listDirectory(`${pp}/wiki`))
+    return paths.map((path) => {
+      const normalized = normalizePath(path)
+      return normalized.toLowerCase().startsWith(`${pp.toLowerCase()}/`)
+        ? normalized.slice(pp.length + 1)
+        : normalized
+    })
+  } catch {
+    // This is only a collision guard. Failure must not block ingest.
+    return []
+  }
 }
 
 export function rewriteIngestPathFromTitleForTargetLanguage(
@@ -1794,6 +1841,7 @@ async function writeFileBlocks(
   signal?: AbortSignal,
   activityId?: string,
   onFileWritten?: (relativePath: string) => void,
+  sourceContent: string = "",
 ): Promise<{
   writtenPaths: string[]
   completedInputPaths: string[]
@@ -1821,6 +1869,88 @@ async function writeFileBlocks(
 
   const targetLang = useWikiStore.getState().outputLanguage
   const today = currentWikiDate()
+  const plannedBlocks = blocks.map(({ path: rawRelativePath, content: rawContent }) => {
+    const requestedRelativePath =
+      sourceSummaryPath && rawRelativePath.startsWith("wiki/sources/")
+        ? sourceSummaryPath
+        : rawRelativePath
+    let plannedContent = sanitizeIngestedFileContent(rawContent)
+    if (isLogPath(requestedRelativePath)) {
+      plannedContent = stampGeneratedLogDate(plannedContent, today)
+    } else if (!isListingPath(requestedRelativePath)) {
+      plannedContent = stampGeneratedFrontmatterDates(plannedContent, today)
+    }
+    if (!isLogPath(requestedRelativePath) && !isListingPath(requestedRelativePath)) {
+      plannedContent = canonicalizeSourcesField(plannedContent, sourceFileName)
+    }
+    const finalPath = rewriteIngestPathFromTitleForTargetLanguage(
+      requestedRelativePath,
+      plannedContent,
+      targetLang,
+    )
+    return {
+      rawRelativePath,
+      requestedRelativePath,
+      finalPath,
+      plannedContent,
+    }
+  })
+  const reservedWikiReferences = await existingWikiReferences(projectPath)
+  const rawSourceTitle = extractRawSourceTitle(sourceContent)
+  const sourceSummaryAliases = sourceSummaryPath
+    ? [
+        sourceFileName,
+        `raw/sources/${sourceFileName}`,
+        ...(rawSourceTitle ? [rawSourceTitle] : []),
+        ...sourceSummarySlugCandidatesFromIdentity(sourceFileName).flatMap((slug) => [
+          slug,
+          `sources/${slug}`,
+          `wiki/sources/${slug}.md`,
+        ]),
+      ]
+    : []
+  const pathRedirects = buildUniqueIngestPathRedirects(
+    plannedBlocks
+      .filter(({ finalPath, plannedContent }) => {
+        if (isAppManagedAggregatePath(finalPath)) return false
+        if (
+          projectSchemaRouting &&
+          !isLogPath(finalPath) &&
+          !isListingPath(finalPath) &&
+          validateWikiPageRouting(finalPath, plannedContent, projectSchemaRouting)
+        ) {
+          return false
+        }
+        const isLog = isLogPath(finalPath)
+        const isEntityOrSource =
+          finalPath.startsWith("wiki/entities/") ||
+          finalPath.includes("/entities/") ||
+          finalPath.startsWith("wiki/sources/") ||
+          finalPath.includes("/sources/")
+        return !(
+          targetLang &&
+          targetLang !== "auto" &&
+          !isLog &&
+          !isEntityOrSource &&
+          !contentMatchesTargetLanguage(plannedContent, targetLang)
+        )
+      })
+      .map(({ rawRelativePath, requestedRelativePath, finalPath, plannedContent }) => ({
+        aliases: [
+          rawRelativePath,
+          requestedRelativePath,
+          ...(extractGeneratedPageTitle(plannedContent)
+            ? [extractGeneratedPageTitle(plannedContent) as string]
+            : []),
+          ...(sourceSummaryPath && finalPath === sourceSummaryPath
+            ? sourceSummaryAliases
+            : []),
+        ],
+        finalPath,
+      })),
+    reservedWikiReferences,
+  )
+  let repairedReferenceCount = 0
 
   for (const { path: rawRelativePath, content: rawContent } of blocks) {
     throwIfIngestAborted(signal, activityId)
@@ -1854,6 +1984,18 @@ async function writeFileBlocks(
     }
     if (sourceSummaryPath && relativePath === sourceSummaryPath) {
       content = sourceSummaryMediaRefsForExternalMarkdown(content)
+      if (sourceContent) {
+        const metadataResult = validateAndRepairSourceSummaryMetadata(
+          content,
+          sourceContent,
+        )
+        content = metadataResult.content
+        warnings.push(
+          ...metadataResult.warnings.map(
+            (warning) => `Source metadata: ${warning}`,
+          ),
+        )
+      }
     }
     relativePath = rewriteIngestPathFromTitleForTargetLanguage(relativePath, content, targetLang)
 
@@ -1902,12 +2044,18 @@ async function writeFileBlocks(
       continue
     }
 
+    const referenceRepair = repairIngestReferences(content, pathRedirects)
+    content = referenceRepair.content
+    repairedReferenceCount += referenceRepair.repairedCount
+
     const fullPath = `${projectPath}/${relativePath}`
     try {
       if (isLogPath(relativePath)) {
         const existing = await tryReadFile(fullPath)
         const appended = existing ? `${existing}\n\n${content.trim()}` : content.trim()
-        await writeFile(fullPath, appended)
+        const repairedAppend = repairIngestReferences(appended, pathRedirects)
+        repairedReferenceCount += repairedAppend.repairedCount
+        await writeFile(fullPath, repairedAppend.content)
       } else if (
         isListingPath(relativePath)
       ) {
@@ -1955,7 +2103,9 @@ async function writeFileBlocks(
         // The merge unions existing frontmatter arrays, so sanitize again to
         // remove legacy/generated paths that may already be stored on disk.
         const toWrite = canonicalizeSourcesField(merged, sourceFileName)
-        await writeFile(fullPath, toWrite)
+        const repairedMerge = repairIngestReferences(toWrite, pathRedirects)
+        repairedReferenceCount += repairedMerge.repairedCount
+        await writeFile(fullPath, repairedMerge.content)
       }
       writtenPaths.push(relativePath)
       completedInputPaths.push(rawRelativePath)
@@ -1966,6 +2116,12 @@ async function writeFileBlocks(
       warnings.push(msg)
       hardFailures.push(relativePath)
     }
+  }
+
+  if (repairedReferenceCount > 0) {
+    console.info(
+      `[ingest] Repaired ${repairedReferenceCount} unambiguous same-batch wiki reference(s).`,
+    )
   }
 
   return {
@@ -2077,6 +2233,8 @@ export function buildAnalysisPrompt(
     "",
     languageRule(sourceContent),
     "",
+    repositoryCapsuleDirective(sourceContent),
+    "",
     "Your analysis should cover:",
     "",
     "## Key Entities",
@@ -2145,6 +2303,8 @@ export function buildGenerationPrompt(
     "Do not output chain-of-thought, hidden reasoning, or explanatory preamble. Reason internally and output only the requested FILE/REVIEW blocks.",
     "",
     languageRule(sourceContent),
+    "",
+    repositoryCapsuleDirective(sourceContent),
     "",
     `## IMPORTANT: Source File`,
     `The original source file is: **${sourceFileName}**`,
@@ -2722,6 +2882,8 @@ function buildChunkAnalysisSystemPrompt(
     "Keep stable names consistent with the existing wiki and prior digest.",
     "",
     languageRule(sourceContent),
+    "",
+    repositoryCapsuleDirective(sourceContent),
     "",
     "Output exactly two markdown sections:",
     "",

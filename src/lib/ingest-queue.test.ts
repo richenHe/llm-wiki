@@ -886,6 +886,43 @@ describe("ingest-queue — pause/resume processing", () => {
       vi.useRealTimers()
     }
   })
+
+  it("pauses the whole queue when the provider CLI is unavailable without burning retries", async () => {
+    mockAutoIngest.mockRejectedValue(
+      new Error("Analysis failed: Codex CLI not found. Install `codex` and try again."),
+    )
+
+    await enqueueBatch(TEST_ID, [
+      { sourcePath: "a.md", folderContext: "" },
+      { sourcePath: "b.md", folderContext: "" },
+    ])
+    await flushMicrotasks(20)
+
+    expect(mockAutoIngest).toHaveBeenCalledTimes(1)
+    expect(getQueueSummary().paused).toBe(true)
+    expect(getQueue()).toHaveLength(2)
+    expect(getQueue().every((task) => task.status === "pending")).toBe(true)
+    expect(getQueue().every((task) => task.retryCount === 0)).toBe(true)
+    expect(getQueue().find((task) => task.sourcePath === "a.md")?.error)
+      .toContain("Paused because the provider is unavailable")
+  })
+
+  it("resumes normally after the provider CLI becomes available", async () => {
+    mockAutoIngest
+      .mockRejectedValueOnce(new Error("Failed to spawn codex: executable not found"))
+      .mockResolvedValue(["wiki/sources/ok.md"])
+
+    await enqueueIngest(TEST_ID, "recover.md")
+    await flushMicrotasks(20)
+    expect(getQueueSummary().paused).toBe(true)
+
+    resumeProcessing()
+    await flushMicrotasks(20)
+
+    expect(mockAutoIngest).toHaveBeenCalledTimes(2)
+    expect(getQueue()).toHaveLength(0)
+    expect(getQueueSummary().paused).toBe(false)
+  })
 })
 
 // ── cleanupWrittenFiles — file delete + LanceDB chunk cascade ──────

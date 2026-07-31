@@ -28,6 +28,22 @@ describe("ingest-cache — checkIngestCache", () => {
     expect(result).toBeNull()
   })
 
+  it("treats a legacy empty object as an empty cache", async () => {
+    mockReadFile.mockResolvedValue("{}")
+    const result = await checkIngestCache(
+      "/project",
+      "collected/robot-coco/report.md",
+      "content",
+    )
+    expect(result).toBeNull()
+  })
+
+  it("treats a malformed entries value as an empty cache", async () => {
+    mockReadFile.mockResolvedValue(JSON.stringify({ entries: [] }))
+    const result = await checkIngestCache("/project", "report.md", "content")
+    expect(result).toBeNull()
+  })
+
   it("returns cached filesWritten when hash matches AND all files exist", async () => {
     // Pre-seed cache with a hash matching "hello".
     // We compute the expected hash by running saveIngestCache first in

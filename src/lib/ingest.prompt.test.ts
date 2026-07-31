@@ -73,6 +73,14 @@ describe("buildAnalysisPrompt language directive", () => {
     const prompt = buildAnalysisPrompt("", "", "", "| goal | wiki/goals/ | x |")
     expect(prompt).toContain("never invent")
   })
+
+  it("preserves evidence status and protected metadata for repository capsules", () => {
+    const source = "---\nreport_contract: repository-framework-v2\ncommit: " + "a".repeat(40) + "\n---"
+    const prompt = buildAnalysisPrompt("", "", source, "")
+    expect(prompt).toContain("Repository framework capsule fidelity policy")
+    expect(prompt).toContain("Do not upgrade project-claim")
+    expect(prompt).toContain("never infer replacements")
+  })
 })
 
 describe("ingest warning log formatting", () => {
@@ -161,6 +169,13 @@ describe("buildGenerationPrompt language directive", () => {
     const prompt = buildGenerationPrompt("", "", "", "x.pdf", undefined, "私は日本語の文章を書きます")
     expect(prompt).toContain("MANDATORY OUTPUT LANGUAGE: English")
     expect(prompt).not.toContain("OUTPUT LANGUAGE: Japanese")
+  })
+
+  it("keeps repository capsule evidence reopenable during generation", () => {
+    const source = "---\nreport_contract: repository-framework-v2\n---"
+    const prompt = buildGenerationPrompt("", "", "", "repo-capsule.md", undefined, source)
+    expect(prompt).toContain("Keep important evidence IDs and commit-pinned URLs")
+    expect(prompt).toContain("Do not invent authors")
   })
 })
 

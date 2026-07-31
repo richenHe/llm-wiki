@@ -622,6 +622,15 @@ function isUsageLimitError(message: string): boolean {
   return /\b429\b|rate[_\s-]*limit|usage\s+limit|quota|too many requests/i.test(message)
 }
 
+/**
+ * Errors that cannot be fixed by retrying an individual source file.
+ * Pause the whole queue so one broken provider/CLI does not consume every
+ * task's retry budget before the user can repair the environment.
+ */
+function isProviderUnavailableError(message: string): boolean {
+  return /(?:codex|claude(?:\s+code)?)\s+cli\s+not\s+found|failed\s+to\s+spawn\s+(?:codex|claude)|(?:codex|claude)\s+(?:command\s+)?not\s+found|(?:codex|claude).*(?:not\s+found\s+on|missing\s+from)\s+path|install\s+[`'"]?(?:codex|claude)[`'"]?/i.test(message)
+}
+
 function scheduleUsageLimitAutoResume(projectId: string): void {
   if (usageLimitResumeTimer) return
   usageLimitResumeTimer = setTimeout(() => {
@@ -719,11 +728,12 @@ async function processNext(projectId: string): Promise<void> {
 
   // Check if LLM is configured
   if (!hasUsableLlm(llmConfig)) {
-    next.status = "failed"
-    next.error = "LLM not configured — set API key in Settings"
+    next.status = "pending"
+    next.error = "Paused because the LLM is not configured — set it up in Settings, then resume the queue"
+    paused = true
     processing = false
     await saveQueue(pp)
-    processNext(projectId)
+    console.log("[Ingest Queue] Paused because the LLM is not configured")
     return
   }
 
@@ -789,6 +799,16 @@ async function processNext(projectId: string): Promise<void> {
       return
     }
     const message = err instanceof Error ? err.message : String(err)
+    if (isProviderUnavailableError(message)) {
+      next.status = "pending"
+      next.error = `Paused because the provider is unavailable: ${message}`
+      paused = true
+      processing = false
+      await saveQueue(pp)
+      console.log(`[Ingest Queue] Paused because the provider is unavailable: ${message}`)
+      return
+    }
+
     if (isUsageLimitError(message)) {
       next.status = "pending"
       next.error = `Paused after provider usage limit: ${message}`
