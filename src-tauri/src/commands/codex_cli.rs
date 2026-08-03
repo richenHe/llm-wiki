@@ -13,7 +13,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use serde::Serialize;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -39,6 +40,20 @@ const MIN_CODEX_SPAWN_TIMEOUT_MINUTES: u64 = 1;
 const MAX_CODEX_SPAWN_TIMEOUT_MINUTES: u64 = 240;
 const STDERR_LIMIT_BYTES: usize = 1024 * 1024;
 const STDOUT_LIMIT_BYTES: usize = 1024 * 1024;
+const MAX_CODEX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_CODEX_IMAGES: usize = 50;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexCliImage {
+    media_type: String,
+    data_base64: String,
+}
+
+struct MaterializedCodexImages {
+    directory: PathBuf,
+    paths: Vec<PathBuf>,
+}
 
 fn append_capped_line(collected: &mut String, line: &str, limit_bytes: usize) {
     if collected.len() >= limit_bytes {
@@ -139,6 +154,7 @@ pub async fn codex_cli_spawn(
     stream_id: String,
     model: String,
     prompt: String,
+    images: Vec<CodexCliImage>,
     isolate_local_config: bool,
     timeout_minutes: Option<u64>,
     working_directory: Option<String>,
@@ -149,6 +165,11 @@ pub async fn codex_cli_spawn(
 
     let working_directory = resolve_codex_working_directory(working_directory).await?;
     let codex = find_codex_command().await?;
+    let materialized_images = materialize_codex_images(&images).await?;
+    let image_paths = materialized_images
+        .as_ref()
+        .map(|materialized| materialized.paths.as_slice())
+        .unwrap_or(&[]);
     let mut cmd = Command::new(&codex);
     suppress_windows_console(&mut cmd);
     // See `codex_cli_detect`: the node shim needs the login shell PATH at run
@@ -156,7 +177,11 @@ pub async fn codex_cli_spawn(
     if let Some(path_env) = child_path_env().await {
         cmd.env("PATH", path_env);
     }
-    cmd.args(build_codex_cli_args(&model, isolate_local_config));
+    cmd.args(build_codex_cli_args(
+        &model,
+        isolate_local_config,
+        image_paths,
+    ));
     cmd.current_dir(&working_directory);
 
     cmd.stdin(Stdio::piped())
@@ -164,31 +189,49 @@ pub async fn codex_cli_spawn(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn codex: {e}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            cleanup_materialized_codex_images(&materialized_images).await;
+            return Err(format!("Failed to spawn codex: {e}"));
+        }
+    };
 
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Missing stdin handle".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Missing stdout handle".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "Missing stderr handle".to_string())?;
+    let mut stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            let _ = child.start_kill();
+            cleanup_materialized_codex_images(&materialized_images).await;
+            return Err("Missing stdin handle".to_string());
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.start_kill();
+            cleanup_materialized_codex_images(&materialized_images).await;
+            return Err("Missing stdout handle".to_string());
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let _ = child.start_kill();
+            cleanup_materialized_codex_images(&materialized_images).await;
+            return Err("Missing stderr handle".to_string());
+        }
+    };
 
-    stdin
-        .write_all(prompt.as_bytes())
-        .await
-        .map_err(|e| format!("Failed to write to codex stdin: {e}"))?;
-    stdin
-        .flush()
-        .await
-        .map_err(|e| format!("Failed to flush codex stdin: {e}"))?;
+    if let Err(e) = stdin.write_all(prompt.as_bytes()).await {
+        let _ = child.start_kill();
+        cleanup_materialized_codex_images(&materialized_images).await;
+        return Err(format!("Failed to write to codex stdin: {e}"));
+    }
+    if let Err(e) = stdin.flush().await {
+        let _ = child.start_kill();
+        cleanup_materialized_codex_images(&materialized_images).await;
+        return Err(format!("Failed to flush codex stdin: {e}"));
+    }
     drop(stdin);
 
     state.children.lock().await.insert(stream_id.clone(), child);
@@ -202,6 +245,7 @@ pub async fn codex_cli_spawn(
     let timeout_duration = Duration::from_secs(timeout_minutes * 60);
     let app_for_task = app.clone();
     let stream_id_task = stream_id.clone();
+    let image_directory = materialized_images.map(|materialized| materialized.directory);
     let topic = format!("codex-cli:{stream_id}");
     let done_topic = format!("codex-cli:{stream_id}:done");
 
@@ -275,6 +319,15 @@ pub async fn codex_cli_spawn(
             exit_code
         };
 
+        if let Some(directory) = image_directory {
+            if let Err(e) = tokio::fs::remove_dir_all(&directory).await {
+                eprintln!(
+                    "[codex-cli] failed to remove temporary image directory {}: {e}",
+                    directory.display()
+                );
+            }
+        }
+
         let _ = app.emit(
             &done_topic,
             serde_json::json!({
@@ -295,7 +348,11 @@ fn codex_spawn_timeout_minutes(value: Option<u64>) -> u64 {
     )
 }
 
-fn build_codex_cli_args(model: &str, isolate_local_config: bool) -> Vec<String> {
+fn build_codex_cli_args(
+    model: &str,
+    isolate_local_config: bool,
+    image_paths: &[PathBuf],
+) -> Vec<String> {
     let mut args = vec!["-a".to_string(), "never".to_string(), "exec".to_string()];
 
     if isolate_local_config {
@@ -303,6 +360,11 @@ fn build_codex_cli_args(model: &str, isolate_local_config: bool) -> Vec<String> 
             "--ignore-user-config".to_string(),
             "--ignore-rules".to_string(),
         ]);
+    }
+
+    for path in image_paths {
+        args.push("--image".to_string());
+        args.push(path.to_string_lossy().to_string());
     }
 
     args.extend([
@@ -316,6 +378,87 @@ fn build_codex_cli_args(model: &str, isolate_local_config: bool) -> Vec<String> 
         "-".to_string(),
     ]);
     args
+}
+
+fn codex_image_extension(media_type: &str) -> Option<&'static str> {
+    match media_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        _ => None,
+    }
+}
+
+async fn materialize_codex_images(
+    images: &[CodexCliImage],
+) -> Result<Option<MaterializedCodexImages>, String> {
+    if images.is_empty() {
+        return Ok(None);
+    }
+    if images.len() > MAX_CODEX_IMAGES {
+        return Err(format!(
+            "Codex CLI accepts at most {MAX_CODEX_IMAGES} images per request"
+        ));
+    }
+
+    let directory =
+        std::env::temp_dir().join(format!("llm-wiki-codex-images-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir(&directory).await.map_err(|e| {
+        format!(
+            "Failed to create temporary Codex image directory {}: {e}",
+            directory.display()
+        )
+    })?;
+
+    let mut paths = Vec::with_capacity(images.len());
+    for (index, image) in images.iter().enumerate() {
+        let extension = match codex_image_extension(&image.media_type) {
+            Some(extension) => extension,
+            None => {
+                let _ = tokio::fs::remove_dir_all(&directory).await;
+                return Err(format!(
+                    "Unsupported Codex CLI image type: {}",
+                    image.media_type
+                ));
+            }
+        };
+        let bytes = match B64.decode(image.data_base64.trim()) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&directory).await;
+                return Err(format!(
+                    "Invalid base64 for Codex CLI image {}: {e}",
+                    index + 1
+                ));
+            }
+        };
+        if bytes.len() > MAX_CODEX_IMAGE_BYTES {
+            let _ = tokio::fs::remove_dir_all(&directory).await;
+            return Err(format!(
+                "Codex CLI image {} exceeds the 5 MB limit",
+                index + 1
+            ));
+        }
+
+        let path = directory.join(format!("image-{}.{}", index + 1, extension));
+        if let Err(e) = tokio::fs::write(&path, bytes).await {
+            let _ = tokio::fs::remove_dir_all(&directory).await;
+            return Err(format!(
+                "Failed to write temporary Codex CLI image {}: {e}",
+                path.display()
+            ));
+        }
+        paths.push(path);
+    }
+
+    Ok(Some(MaterializedCodexImages { directory, paths }))
+}
+
+async fn cleanup_materialized_codex_images(images: &Option<MaterializedCodexImages>) {
+    if let Some(images) = images {
+        let _ = tokio::fs::remove_dir_all(&images.directory).await;
+    }
 }
 
 async fn resolve_codex_working_directory(value: Option<String>) -> Result<PathBuf, String> {
@@ -413,7 +556,7 @@ mod tests {
 
     #[test]
     fn codex_args_do_not_isolate_local_config_by_default() {
-        let args = build_codex_cli_args("gpt-5", false);
+        let args = build_codex_cli_args("gpt-5", false, &[]);
 
         assert!(args
             .windows(3)
@@ -426,7 +569,7 @@ mod tests {
 
     #[test]
     fn codex_args_can_isolate_user_config_and_rules() {
-        let args = build_codex_cli_args("gpt-5", true);
+        let args = build_codex_cli_args("gpt-5", true, &[]);
         let exec_pos = args.iter().position(|arg| arg == "exec").expect("exec arg");
         let ignore_config_pos = args
             .iter()
@@ -439,6 +582,40 @@ mod tests {
 
         assert!(ignore_config_pos > exec_pos);
         assert!(ignore_rules_pos > exec_pos);
+    }
+
+    #[test]
+    fn codex_args_attach_each_image_before_the_prompt() {
+        let paths = vec![PathBuf::from("first.png"), PathBuf::from("second.jpg")];
+        let args = build_codex_cli_args("gpt-5.6-sol", false, &paths);
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--image" && pair[1] == "first.png"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--image" && pair[1] == "second.jpg"));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+    }
+
+    #[tokio::test]
+    async fn materializes_supported_images_for_codex_cli() {
+        let result = materialize_codex_images(&[CodexCliImage {
+            media_type: "image/png".to_string(),
+            data_base64: B64.encode(b"png bytes"),
+        }])
+        .await
+        .expect("materialize")
+        .expect("images");
+
+        assert_eq!(result.paths.len(), 1);
+        assert_eq!(
+            tokio::fs::read(&result.paths[0]).await.expect("read image"),
+            b"png bytes"
+        );
+        tokio::fs::remove_dir_all(result.directory)
+            .await
+            .expect("cleanup");
     }
 
     struct TestDir(PathBuf);

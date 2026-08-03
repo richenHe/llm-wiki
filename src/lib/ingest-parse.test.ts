@@ -21,6 +21,8 @@ import { describe, it, expect } from "vitest"
 import {
   parseFileBlocks,
   isSafeIngestPath,
+  normalizeRecoverableIngestPath,
+  extractExpectedKnowledgePaths,
   stampGeneratedFrontmatterDates,
   stampGeneratedLogDate,
   buildGenerationPrompt,
@@ -478,6 +480,22 @@ describe("isSafeIngestPath — what the validator accepts and rejects", () => {
 })
 
 describe("parseFileBlocks — path-traversal guard end-to-end", () => {
+  it("normalizes ordinary Windows-invalid filename punctuation without weakening traversal guards", () => {
+    const text = [
+      '---FILE: wiki/concepts/坐标法"三步曲".md---',
+      "# 坐标法三步曲",
+      "---END FILE---",
+    ].join("\n")
+    const { blocks, warnings } = parseFileBlocks(text)
+
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0].path).toBe("wiki/concepts/坐标法三步曲.md")
+    expect(warnings).toContain(
+      'FILE block path "wiki/concepts/坐标法"三步曲".md" normalized to Windows-safe path "wiki/concepts/坐标法三步曲.md".',
+    )
+    expect(normalizeRecoverableIngestPath("../../Windows/system.ini")).toBeNull()
+  })
+
   it("drops blocks with ../ paths and surfaces a warning", () => {
     const text = [
       "---FILE: wiki/concepts/legit.md---",
@@ -540,6 +558,25 @@ describe("parseFileBlocks — path-traversal guard end-to-end", () => {
       "wiki/entities/topic-b.md",
     ])
     expect(warnings.some((w) => w.includes("../config.json"))).toBe(true)
+  })
+})
+
+describe("extractExpectedKnowledgePaths", () => {
+  it("collects only explicit entity/concept paths, deduplicates them, and normalizes recoverable names", () => {
+    const analysis = [
+      "- [[concepts/椭圆]] — definition",
+      "- [[concepts/椭圆|椭圆曲线]] — duplicate alias",
+      '- [[concepts/坐标法"三步曲"]] — quoted title',
+      "- [[entities/笛卡儿.md]] — person",
+      "- [[ordinary-bare-link]] — incidental",
+      "- [[sources/paper]] — source pages are not mandatory knowledge pages",
+    ].join("\n")
+
+    expect(extractExpectedKnowledgePaths(analysis)).toEqual([
+      "wiki/concepts/椭圆.md",
+      "wiki/concepts/坐标法三步曲.md",
+      "wiki/entities/笛卡儿.md",
+    ])
   })
 })
 

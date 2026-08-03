@@ -16,6 +16,8 @@ let failLongChunksOnce = new Set<number>()
 let extraReviewResponse = ""
 let generationSuffix = ""
 let truncatedRepairResponse = ""
+let missingPageRepairResponse = ""
+let analysisOverride = ""
 let abortDuringReview: AbortController | null = null
 let interactiveGenerationOverride = ""
 let mergeRequestCount = 0
@@ -94,11 +96,17 @@ vi.mock("./llm-client", () => ({
       return
     }
 
+    if (systemPrompt.startsWith("You are completing wiki pages")) {
+      cb.onToken(missingPageRepairResponse)
+      cb.onDone()
+      return
+    }
+
     const targetMatch = systemPrompt.match(
       /source summary page at \*\*(wiki\/sources\/[^*]+)\*\*/,
     )
     if (!targetMatch) {
-      cb.onToken("## Analysis\nConfiguration source.")
+      cb.onToken(analysisOverride || "## Analysis\nConfiguration source.")
       cb.onDone()
       return
     }
@@ -150,6 +158,8 @@ describe("autoIngest source summary paths", () => {
     extraReviewResponse = ""
     generationSuffix = ""
     truncatedRepairResponse = ""
+    missingPageRepairResponse = ""
+    analysisOverride = ""
     abortDuringReview = null
     interactiveGenerationOverride = ""
     mergeRequestCount = 0
@@ -688,6 +698,75 @@ describe("autoIngest source summary paths", () => {
         ),
       ),
     ).toBe(true)
+  })
+
+  it("repairs an expected analysis page that the main generation never started", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    sourceMarkers = ["project-a config"]
+    analysisOverride = [
+      "## Key Concepts",
+      "- [[concepts/missing-concept]] — important concept from the source.",
+    ].join("\n")
+    missingPageRepairResponse = [
+      "---FILE: wiki/concepts/missing-concept.md---",
+      "---",
+      "type: concept",
+      "title: Missing Concept",
+      "tags: [test]",
+      "related: []",
+      'sources: ["project-a/config.yaml"]',
+      "---",
+      "",
+      "# Missing Concept",
+      "",
+      "Recovered after the main generation omitted the page entirely.",
+      "---END FILE---",
+    ].join("\n")
+
+    const written = await autoIngest(
+      tmp.path,
+      `${tmp.path}/raw/sources/project-a/config.yaml`,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+    )
+
+    expect(written).toContain("wiki/concepts/missing-concept.md")
+    await expect(
+      fs.readFile(`${tmp.path}/wiki/concepts/missing-concept.md`, "utf8"),
+    ).resolves.toContain("Recovered after the main generation omitted the page entirely.")
+    expect(
+      mockStreamChat.mock.calls.some(([, messages]) =>
+        String(messages[0]?.content ?? "").startsWith("You are completing wiki pages"),
+      ),
+    ).toBe(true)
+    expect(useActivityStore.getState().items[0]?.status).toBe("done")
+  })
+
+  it("fails visibly when expected analysis pages remain missing after bounded repair", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    sourceMarkers = ["project-a config"]
+    analysisOverride = "## Key Concepts\n- [[concepts/still-missing]] — required."
+    missingPageRepairResponse = ""
+
+    await expect(
+      autoIngest(
+        tmp.path,
+        `${tmp.path}/raw/sources/project-a/config.yaml`,
+        useWikiStore.getState().llmConfig,
+        undefined,
+        "project-a",
+      ),
+    ).rejects.toThrow(/1 expected page\(s\) missing/)
+
+    const activity = useActivityStore.getState().items[0]
+    expect(activity?.status).toBe("error")
+    expect(activity?.detail).toContain("1 expected page(s) missing")
+    expect(
+      mockStreamChat.mock.calls.filter(([, messages]) =>
+        String(messages[0]?.content ?? "").startsWith("You are completing wiki pages"),
+      ),
+    ).toHaveLength(2)
   })
 
   it("propagates cancellation that happens during the dedicated review stage", async () => {

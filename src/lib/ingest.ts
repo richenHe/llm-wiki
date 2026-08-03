@@ -61,6 +61,8 @@ const INGEST_GENERATION_TOKENS_256K = 24_576
 const INGEST_GENERATION_TOKENS_512K = 32_768
 const REVIEW_STAGE_MIN_SIGNAL_CHARS = 10_000
 const REVIEW_STAGE_MIN_FILE_BLOCKS = 4
+const MISSING_PAGE_REPAIR_BATCH_SIZE = 10
+const MISSING_PAGE_REPAIR_ATTEMPTS = 2
 const AGGREGATE_WIKI_PATHS = ["wiki/index.md", "wiki/overview.md", "wiki/log.md"] as const
 
 function appendSavedImageRefsForCaption(content: string, images: SavedImage[]): string {
@@ -410,6 +412,55 @@ export function isSafeIngestPath(p: string): boolean {
   return true
 }
 
+/**
+ * Recover a model-generated path that is structurally confined to `wiki/`
+ * but contains ordinary Windows-invalid filename punctuation. Security
+ * boundaries (absolute paths, traversal, control bytes, and non-wiki roots)
+ * remain hard failures; only individual path segments are canonicalized.
+ */
+export function normalizeRecoverableIngestPath(p: string): string | null {
+  if (typeof p !== "string" || p.trim().length === 0) return null
+  if (/[\x00-\x1f]/.test(p)) return null
+  const trimmed = p.trim()
+  if (trimmed.startsWith("/") || trimmed.startsWith("\\") || /^[a-zA-Z]:/.test(trimmed)) {
+    return null
+  }
+
+  const normalized = trimmed.replace(/\\/g, "/")
+  const segments = normalized.split("/")
+  if (segments[0] !== "wiki" || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    return null
+  }
+
+  const repaired = segments.map((segment, index) => {
+    if (index === 0) return segment
+    let next = segment
+      .replace(/[<>:"|?*]/g, "")
+      .replace(/[ .]+$/g, "")
+      .trim()
+    if (!next) return ""
+
+    const dot = next.indexOf(".")
+    const stem = (dot > 0 ? next.slice(0, dot) : next).toUpperCase()
+    const extension = dot > 0 ? next.slice(dot) : ""
+    if (
+      stem === "CON" ||
+      stem === "PRN" ||
+      stem === "AUX" ||
+      stem === "NUL" ||
+      /^COM[1-9]$/.test(stem) ||
+      /^LPT[1-9]$/.test(stem)
+    ) {
+      next = `${dot > 0 ? next.slice(0, dot) : next}-page${extension}`
+    }
+    return next
+  })
+
+  if (repaired.some((segment) => !segment)) return null
+  const candidate = repaired.join("/")
+  return isSafeIngestPath(candidate) ? candidate : null
+}
+
 function isWindowsSafePathSegment(segment: string): boolean {
   if (segment.length === 0) return false
   if (/[<>:"|?*]/.test(segment)) return false
@@ -476,7 +527,8 @@ export function parseFileBlocks(text: string): ParseFileBlocksResult {
       i++
       continue
     }
-    const path = openerMatch[1].trim()
+    const rawPath = openerMatch[1].trim()
+    const path = normalizeRecoverableIngestPath(rawPath)
     i++ // consume opener
 
     const contentLines: string[] = []
@@ -524,15 +576,15 @@ export function parseFileBlocks(text: string): ParseFileBlocksResult {
     if (!closed) {
       // H2 fix (partial): we can't fabricate content the LLM never
       // sent, but we surface the drop instead of silently hiding it.
-      const pathLabel = path || "(unnamed)"
+      const pathLabel = rawPath || "(unnamed)"
       const msg = `FILE block "${pathLabel}" was not closed before end of stream — likely truncation (model hit max_tokens, timeout, or connection dropped). Block dropped.`
       console.warn(`[ingest] ${msg}`)
       warnings.push(msg)
-      if (isSafeIngestPath(path)) truncatedPaths.push(path)
+      if (path) truncatedPaths.push(path)
       continue
     }
 
-    if (!path) {
+    if (!rawPath) {
       // H6 fix: surface empty-path blocks.
       const msg = `FILE block with empty path skipped (LLM omitted the path after \`---FILE:\`).`
       console.warn(`[ingest] ${msg}`)
@@ -540,13 +592,19 @@ export function parseFileBlocks(text: string): ParseFileBlocksResult {
       continue
     }
 
-    if (!isSafeIngestPath(path)) {
+    if (!path) {
       // Path-traversal guard. Drops blocks whose path tries to escape
       // wiki/ — see isSafeIngestPath for the threat model.
-      const msg = `FILE block with unsafe path "${path}" rejected (must be under wiki/, no .., no absolute paths, and Windows-safe file names).`
+      const msg = `FILE block with unsafe path "${rawPath}" rejected (must be under wiki/, no .., no absolute paths, and Windows-safe file names).`
       console.warn(`[ingest] ${msg}`)
       warnings.push(msg)
       continue
+    }
+
+    if (path !== rawPath.replace(/\\/g, "/")) {
+      const msg = `FILE block path "${rawPath}" normalized to Windows-safe path "${path}".`
+      console.info(`[ingest] ${msg}`)
+      warnings.push(msg)
     }
 
     blocks.push({ path, content: contentLines.join("\n") })
@@ -1130,6 +1188,7 @@ async function autoIngestImpl(
   )
   throwIfIngestAborted(signal, activityId)
   const writtenPaths = writeResult.writtenPaths
+  const completedInputPaths = [...writeResult.completedInputPaths]
   const writeWarnings = writeResult.warnings
   const hardFailures = writeResult.hardFailures
   let unrecoveredTruncatedPaths = uniqueNormalizedPaths(
@@ -1218,6 +1277,11 @@ async function autoIngestImpl(
             writtenPaths.push(path)
           }
         }
+        for (const path of repairResult.completedInputPaths) {
+          if (!completedInputPaths.some((completedPath) => normalizePath(completedPath) === normalizePath(path))) {
+            completedInputPaths.push(path)
+          }
+        }
         for (const path of recoveredPaths) {
           const warningPrefix = `FILE block "${path}" was not closed before end of stream`
           for (let i = writeWarnings.length - 1; i >= 0; i--) {
@@ -1237,6 +1301,133 @@ async function autoIngestImpl(
         `Truncated FILE repair failed: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
+  }
+
+  // Stage 1 names expected entity/concept pages with path-qualified
+  // wikilinks. A stream may end before later FILE blocks even begin, so the
+  // truncation repair above cannot see them. Compare the analysis contract
+  // with completed/on-disk pages and generate only the missing tail in small
+  // batches. Successful ingests make no additional model calls.
+  const expectedKnowledgePaths = isCuratedPassthroughSource(enrichedSourceContent)
+    ? []
+    : extractExpectedKnowledgePaths(analysis)
+  let incompleteExpectedPaths = await findMissingExpectedKnowledgePaths(
+    pp,
+    expectedKnowledgePaths,
+    completedInputPaths,
+  )
+  for (
+    let attempt = 1;
+    attempt <= MISSING_PAGE_REPAIR_ATTEMPTS && incompleteExpectedPaths.length > 0 && !signal?.aborted;
+    attempt++
+  ) {
+    activity.updateItem(activityId, {
+      detail: `Completing missing wiki pages (${incompleteExpectedPaths.length} remaining, attempt ${attempt}/${MISSING_PAGE_REPAIR_ATTEMPTS})...`,
+    })
+    for (const batch of chunkArray(incompleteExpectedPaths, MISSING_PAGE_REPAIR_BATCH_SIZE)) {
+      throwIfIngestAborted(signal, activityId)
+      let missingRepairOutput = ""
+      let repairStreamFailed = false
+      try {
+        await streamChat(
+          llmConfig,
+          [
+            {
+              role: "system",
+              content: buildMissingPageRepairPrompt(
+                batch,
+                sourceIdentity,
+                {
+                  schema,
+                  purpose,
+                  analysis,
+                  sourceContext,
+                  maxContextSize: llmConfig.maxContextSize,
+                },
+              ),
+            },
+            {
+              role: "user",
+              content: "Generate every requested missing FILE block now. Start immediately with `---FILE:`.",
+            },
+          ],
+          {
+            onToken: (token) => { missingRepairOutput += token },
+            onDone: () => {},
+            onError: (err) => {
+              repairStreamFailed = true
+              writeWarnings.push(`Missing-page repair failed: ${err.message}`)
+            },
+          },
+          signal,
+          {
+            temperature: 0.1,
+            reasoning: { mode: "off" },
+            max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize),
+          },
+        )
+        throwIfIngestAborted(signal, activityId)
+      } catch (err) {
+        throwIfIngestAborted(signal, activityId)
+        repairStreamFailed = true
+        writeWarnings.push(
+          `Missing-page repair failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+
+      if (repairStreamFailed || !missingRepairOutput.trim()) continue
+      const filteredRepair = filterTruncatedFileRepairOutput(missingRepairOutput, batch)
+      writeWarnings.push(...filteredRepair.warnings)
+      const repairResult = await writeFileBlocks(
+        pp,
+        filteredRepair.text,
+        llmConfig,
+        sourceIdentity,
+        sourceSummaryPath,
+        signal,
+        activityId,
+        onFileWritten,
+        sourceContent,
+      )
+      for (const path of repairResult.writtenPaths) {
+        if (!writtenPaths.some((writtenPath) => normalizePath(writtenPath) === normalizePath(path))) {
+          writtenPaths.push(path)
+        }
+      }
+      for (const path of repairResult.completedInputPaths) {
+        if (!completedInputPaths.some((completedPath) => normalizePath(completedPath) === normalizePath(path))) {
+          completedInputPaths.push(path)
+        }
+      }
+      writeWarnings.push(...repairResult.warnings)
+      hardFailures.push(...repairResult.hardFailures)
+    }
+
+    incompleteExpectedPaths = await findMissingExpectedKnowledgePaths(
+      pp,
+      expectedKnowledgePaths,
+      completedInputPaths,
+    )
+  }
+
+  // A page first seen as truncated may have been recovered by the broader
+  // missing-page pass. Reconcile the original truncation list before deciding
+  // whether the ingest is complete.
+  const completedInputPathKeys = new Set(
+    completedInputPaths.map((path) => normalizePath(path).toLowerCase()),
+  )
+  const stillTruncatedPaths: string[] = []
+  for (const path of unrecoveredTruncatedPaths) {
+    if (completedInputPathKeys.has(normalizePath(path).toLowerCase())) continue
+    if (await fileExists(`${pp}/${path}`)) continue
+    stillTruncatedPaths.push(path)
+  }
+  unrecoveredTruncatedPaths = stillTruncatedPaths
+
+  if (incompleteExpectedPaths.length > 0) {
+    writeWarnings.push(
+      `Missing ${incompleteExpectedPaths.length} expected wiki page(s) after repair: ${incompleteExpectedPaths.join(", ")}`,
+    )
   }
 
   try {
@@ -1283,7 +1474,27 @@ async function autoIngestImpl(
 
   // Ensure source summary page exists (LLM may not have generated it correctly)
   const sourceSummaryFullPath = `${pp}/${sourceSummaryPath}`
-  const hasSourceSummary = writtenPaths.some((p) => normalizePath(p) === sourceSummaryPath)
+  let hasSourceSummary = writtenPaths.some((p) => normalizePath(p) === sourceSummaryPath)
+
+  // A separately audited source can opt into exact source-page preservation.
+  // The opt-in is deliberately narrow so ordinary Markdown keeps the existing
+  // analysis/generation behavior.  Video packages use this only after their
+  // deterministic cue/segment coverage checks have passed.
+  const curatedPassthrough = buildCuratedPassthroughSourceSummary(
+    sourceIdentity,
+    enrichedSourceContent,
+    currentWikiDate(),
+  )
+  if (curatedPassthrough && !signal?.aborted) {
+    // This is a completeness contract, so a failed exact write must fail the
+    // ingest instead of silently leaving an LLM-compressed page in its place.
+    await writeFile(sourceSummaryFullPath, curatedPassthrough)
+    if (!hasSourceSummary) {
+      writtenPaths.push(sourceSummaryPath)
+      onFileWritten?.(sourceSummaryPath)
+    }
+    hasSourceSummary = true
+  }
 
   // If the signal was aborted (e.g. user switched projects / cancelled),
   // skip the fallback summary write — the LLM streams returned empty
@@ -1298,9 +1509,15 @@ async function autoIngestImpl(
       await writeFile(sourceSummaryFullPath, fallbackContent)
       writtenPaths.push(sourceSummaryPath)
       onFileWritten?.(sourceSummaryPath)
+      hasSourceSummary = true
     } catch {
       // non-critical
     }
+  }
+  if (hasSourceSummary) {
+    unrecoveredTruncatedPaths = unrecoveredTruncatedPaths.filter(
+      (path) => normalizePath(path) !== normalizePath(sourceSummaryPath),
+    )
   }
 
   // ── Step 3.5: Append extracted images to the source-summary page ─
@@ -1336,15 +1553,20 @@ async function autoIngestImpl(
   if (
     writtenPaths.length > 0 &&
     hardFailures.length === 0 &&
-    unrecoveredTruncatedPaths.length === 0
+    unrecoveredTruncatedPaths.length === 0 &&
+    incompleteExpectedPaths.length === 0
   ) {
     await saveIngestCache(pp, sourceIdentity, sourceContent, writtenPaths)
     if (longSourceCheckpointPath) {
       await clearLongSourceCheckpoint(longSourceCheckpointPath)
     }
-  } else if (hardFailures.length > 0 || unrecoveredTruncatedPaths.length > 0) {
+  } else if (
+    hardFailures.length > 0 ||
+    unrecoveredTruncatedPaths.length > 0 ||
+    incompleteExpectedPaths.length > 0
+  ) {
     console.warn(
-      `[ingest] Skipping cache save for "${sourceIdentity}" — ${hardFailures.length} write failure(s), ${unrecoveredTruncatedPaths.length} truncated FILE block(s) still missing.`,
+      `[ingest] Skipping cache save for "${sourceIdentity}" — ${hardFailures.length} write failure(s), ${unrecoveredTruncatedPaths.length} truncated FILE block(s), ${incompleteExpectedPaths.length} expected page(s) still missing.`,
     )
   }
 
@@ -1370,18 +1592,30 @@ async function autoIngestImpl(
     }
   }
 
+  const ingestComplete = writtenPaths.length > 0 &&
+    hardFailures.length === 0 &&
+    unrecoveredTruncatedPaths.length === 0 &&
+    incompleteExpectedPaths.length === 0
   const baseDetail = writtenPaths.length > 0
     ? `${writtenPaths.length} files written${reviewItems.length > 0 ? `, ${reviewItems.length} review item(s)` : ""}`
     : "No files generated"
+  const incompleteSummary = !ingestComplete
+    ? `Incomplete ingest: ${hardFailures.length} write failure(s), ${unrecoveredTruncatedPaths.length} truncated file(s), ${incompleteExpectedPaths.length} expected page(s) missing.`
+    : ""
+  const detailBase = incompleteSummary ? `${baseDetail} — ${incompleteSummary}` : baseDetail
   const detail = warningSummary
-    ? `${baseDetail} — ${warningSummary} (saved to .llm-wiki/ingest-warnings.log)`
-    : baseDetail
+    ? `${detailBase} — ${warningSummary} (saved to .llm-wiki/ingest-warnings.log)`
+    : detailBase
 
   activity.updateItem(activityId, {
-    status: writtenPaths.length > 0 ? "done" : "error",
+    status: ingestComplete ? "done" : "error",
     detail,
     filesWritten: writtenPaths,
   })
+
+  if (!ingestComplete) {
+    throw new Error(incompleteSummary || "Ingest produced no output files")
+  }
 
   return writtenPaths
 }
@@ -1774,6 +2008,60 @@ export function currentWikiDate(now: Date = new Date()): string {
   const month = String(now.getMonth() + 1).padStart(2, "0")
   const day = String(now.getDate()).padStart(2, "0")
   return `${year}-${month}-${day}`
+}
+
+export function isCuratedPassthroughSource(content: string): boolean {
+  const { frontmatter } = parseFrontmatter(content)
+  return frontmatter?.ingest_mode === "curated_passthrough"
+    && frontmatter?.coverage_status === "complete"
+}
+
+/**
+ * Convert an externally audited Markdown source into LLM Wiki's source-page
+ * shape without summarizing or truncating its body. Returns null unless both
+ * explicit opt-in fields are present.
+ */
+export function buildCuratedPassthroughSourceSummary(
+  sourceIdentity: string,
+  content: string,
+  date: string,
+): string | null {
+  const parsed = parseFrontmatter(content)
+  if (
+    parsed.frontmatter?.ingest_mode !== "curated_passthrough"
+    || parsed.frontmatter?.coverage_status !== "complete"
+  ) {
+    return null
+  }
+  const title = typeof parsed.frontmatter.title === "string" && parsed.frontmatter.title.trim()
+    ? parsed.frontmatter.title.trim()
+    : `Source: ${sourceIdentity}`
+  const normalizedIdentity = normalizePath(sourceIdentity)
+  const sourceDirectory = normalizedIdentity.includes("/")
+    ? normalizedIdentity.slice(0, normalizedIdentity.lastIndexOf("/"))
+    : ""
+  const rawSourcePrefix = `../../raw/sources/${sourceDirectory ? `${sourceDirectory}/` : ""}`
+  // The injector makes archived evidence relative to the raw source file.
+  // Rebase those links because this preserved body is written under
+  // wiki/sources/ while the evidence remains under raw/sources/.
+  const rebasedBody = parsed.body.replace(
+    /(\]\()(?=\.cache\/)/g,
+    `$1${rawSourcePrefix}`,
+  )
+  return [
+    "---",
+    "type: source",
+    `title: ${JSON.stringify(title)}`,
+    `created: ${date}`,
+    `updated: ${date}`,
+    `sources: [${JSON.stringify(sourceIdentity)}]`,
+    "tags: [video-knowledge, curated-passthrough]",
+    "related: []",
+    "---",
+    "",
+    rebasedBody.trim(),
+    "",
+  ].join("\n")
 }
 
 export function buildFallbackSourceSummary(
@@ -2520,6 +2808,81 @@ type TruncatedFileRepairContext = {
   readonly analysis: string
   readonly sourceContext: string
   readonly maxContextSize: number | undefined
+}
+
+/**
+ * Collect only explicit entity/concept page paths from Stage 1. Bare
+ * wikilinks are intentionally ignored so incidental prose references do not
+ * become mandatory pages.
+ */
+export function extractExpectedKnowledgePaths(analysis: string): string[] {
+  const expected: string[] = []
+  const seen = new Set<string>()
+  const linkPattern = /\[\[((?:wiki\/)?(?:concepts|entities)\/[^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/gi
+  for (const match of analysis.matchAll(linkPattern)) {
+    let candidate = match[1].trim().replace(/\\/g, "/")
+    if (!candidate.startsWith("wiki/")) candidate = `wiki/${candidate}`
+    if (!candidate.toLowerCase().endsWith(".md")) candidate += ".md"
+    const normalized = normalizeRecoverableIngestPath(candidate)
+    if (!normalized) continue
+    const key = normalizePath(normalized).toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    expected.push(normalized)
+  }
+  return expected
+}
+
+async function findMissingExpectedKnowledgePaths(
+  projectPath: string,
+  expectedPaths: readonly string[],
+  completedInputPaths: readonly string[],
+): Promise<string[]> {
+  const completed = new Set(completedInputPaths.map((path) => normalizePath(path).toLowerCase()))
+  const missing: string[] = []
+  for (const path of expectedPaths) {
+    if (completed.has(normalizePath(path).toLowerCase())) continue
+    if (await fileExists(`${projectPath}/${path}`)) continue
+    missing.push(path)
+  }
+  return missing
+}
+
+function chunkArray<T>(items: readonly T[], size: number): T[][] {
+  const chunks: T[][] = []
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size))
+  }
+  return chunks
+}
+
+function buildMissingPageRepairPrompt(
+  paths: readonly string[],
+  sourceIdentity: string,
+  context: TruncatedFileRepairContext,
+): string {
+  const { schema, purpose, analysis, sourceContext, maxContextSize } = context
+  const { maxCtx } = computeContextBudget(maxContextSize)
+  const sectionCap = Math.max(4_000, Math.floor(maxCtx * 0.12))
+  return [
+    "You are completing wiki pages that were identified during analysis but were absent after the main generation pass.",
+    "Return exactly one complete FILE block for every requested path and no other files.",
+    "Every block must end with `---END FILE---`. Do not output a preamble, REVIEW blocks, or trailing commentary.",
+    "Keep each page concise and evidence-bound. Include valid YAML frontmatter with type, title, tags, related, and sources.",
+    "Preserve each requested path exactly and include the source identity in frontmatter `sources`.",
+    "Do not omit any requested path even if a related page was generated elsewhere.",
+    "",
+    languageRule(sourceContext),
+    "",
+    "## Requested missing paths",
+    ...paths.map((path) => `- ${path}`),
+    "",
+    `## Source identity\n${sourceIdentity}`,
+    schema ? `## Project schema\n${trimLongText(schema, sectionCap)}` : "",
+    purpose ? `## Wiki purpose\n${trimLongText(purpose, sectionCap)}` : "",
+    `## Stage 1 analysis\n${trimLongText(analysis, sectionCap)}`,
+    `## Source context\n${trimLongText(sourceContext, sectionCap)}`,
+  ].filter(Boolean).join("\n")
 }
 
 function buildTruncatedFileRepairPrompt(

@@ -323,11 +323,11 @@ describe("MiniMax Anthropic-compatible endpoint", () => {
     }))).toBe(false)
   })
 
-  it("reports Codex CLI as not image-capable because images are text-omitted", () => {
+  it("reports Codex CLI as image-capable through codex exec --image", () => {
     expect(supportsImageInput(mkConfig({
       provider: "codex-cli",
       model: "gpt-5-codex",
-    }))).toBe(false)
+    }))).toBe(true)
   })
 
   it("reports official MiniMax M2.x Anthropic endpoints as not image-capable", () => {

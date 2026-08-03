@@ -33,16 +33,6 @@ export function parseCodexCliLine(rawLine: string): string | null {
   return typeof item.text === "string" && item.text.length > 0 ? item.text : null
 }
 
-function contentToText(content: string | ContentBlock[]): string {
-  if (typeof content === "string") return content
-  return content
-    .map((block) => {
-      if (block.type === "text") return block.text
-      return `[Image omitted: ${block.mediaType}]`
-    })
-    .join("\n")
-}
-
 function escapePromptContent(text: string): string {
   return text.replace(/<\/?[A-Z_][A-Z0-9_]*>/gi, (tag) =>
     tag.replace(/</g, "&lt;").replace(/>/g, "&gt;"),
@@ -50,18 +40,42 @@ function escapePromptContent(text: string): string {
 }
 
 export function buildPrompt(messages: ChatMessage[]): string {
+  let imageNumber = 0
   return messages
     .map((message) => {
       const role = message.role.toUpperCase()
-      return `<${role}>\n${escapePromptContent(contentToText(message.content))}\n</${role}>`
+      const content = typeof message.content === "string"
+        ? message.content
+        : message.content
+          .map((block) => {
+            if (block.type === "text") return block.text
+            imageNumber += 1
+            return `[Attached image ${imageNumber}]`
+          })
+          .join("\n")
+      return `<${role}>\n${escapePromptContent(content)}\n</${role}>`
     })
     .join("\n\n")
+}
+
+export function collectCodexCliImages(messages: ChatMessage[]): Array<{
+  mediaType: string
+  dataBase64: string
+}> {
+  return messages.flatMap((message) =>
+    typeof message.content === "string"
+      ? []
+      : message.content
+        .filter((block): block is Extract<ContentBlock, { type: "image" }> => block.type === "image")
+        .map(({ mediaType, dataBase64 }) => ({ mediaType, dataBase64 })),
+  )
 }
 
 type SpawnPayload = Record<string, unknown> & {
   streamId: string
   model: string
   prompt: string
+  images: Array<{ mediaType: string; dataBase64: string }>
   isolateLocalConfig: boolean
   timeoutMinutes?: number
   workingDirectory?: string
@@ -205,6 +219,7 @@ export async function streamCodexCli(
       streamId,
       model: config.model,
       prompt: buildPrompt(messages),
+      images: collectCodexCliImages(messages),
       isolateLocalConfig: config.localCliIsolation === true,
       timeoutMinutes: config.codexCliTimeoutMinutes,
       workingDirectory,
