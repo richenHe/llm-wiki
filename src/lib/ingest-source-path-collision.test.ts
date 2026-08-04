@@ -1091,7 +1091,7 @@ describe("autoIngest source summary paths", () => {
     ).rejects.toThrow("Ingest cancelled")
   })
 
-  it("falls back to built-in PDF extraction when MinerU fails for a non-cancelled ingest", async () => {
+  it("stops PDF ingest without built-in extraction when MinerU fails", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["mineru fallback source"]
     await writeFileRaw(`${tmp.path}/raw/sources/project-a/report.pdf`, "pdf fallback text\n")
@@ -1103,24 +1103,16 @@ describe("autoIngest source summary paths", () => {
       },
     })
     mockParseWithMineru.mockRejectedValueOnce(new Error("network failure from MinerU"))
-    const updateSpy = vi.spyOn(useActivityStore.getState(), "updateItem")
-
-    const written = await autoIngest(
+    await expect(autoIngest(
       tmp.path,
       `${tmp.path}/raw/sources/project-a/report.pdf`,
       useWikiStore.getState().llmConfig,
       undefined,
       "project-a",
-    )
+    )).rejects.toThrow("No built-in extraction, page rendering, or vision-model calls were started")
 
-    expect(written.length).toBeGreaterThan(0)
     expect(mockParseWithMineru).toHaveBeenCalled()
-    expect(
-      updateSpy.mock.calls.some(([, updates]) =>
-        updates.detail?.includes("falling back to built-in PDF extraction"),
-      ),
-    ).toBe(true)
-    updateSpy.mockRestore()
+    expect(mockStreamChat).not.toHaveBeenCalled()
   })
 
   it("uses a configured local MinerU backend without a cloud token", async () => {

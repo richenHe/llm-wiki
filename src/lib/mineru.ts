@@ -438,6 +438,21 @@ function rewriteMineruMarkdownImages(markdown: string, pathMap: Map<string, stri
   )
 }
 
+function unresolvedLocalImageRefs(markdown: string): string[] {
+  const refs = new Set<string>()
+  const isSavedMineruRef = (target: string): boolean =>
+    /^media\/[^/]+\/mineru\//i.test(target)
+  for (const match of markdown.matchAll(/!\[[^\]]*]\(((?:[^()]|\([^()]*\))*)\)/g)) {
+    const target = match[1].trim().replace(/^<|>$/g, "").split(/\s+["']/)[0]
+    if (target && !isExternalOrDataUrl(target) && !isSavedMineruRef(target)) refs.add(target)
+  }
+  for (const match of markdown.matchAll(/<img\b[^>]*\bsrc=(["'])([^"']+)\1[^>]*>/gi)) {
+    const target = match[2].trim()
+    if (target && !isExternalOrDataUrl(target) && !isSavedMineruRef(target)) refs.add(target)
+  }
+  return [...refs]
+}
+
 async function submitUrlTask(
   token: string,
   url: string,
@@ -664,9 +679,9 @@ async function downloadAndExtractMarkdown(
   if (!buffer) throw lastDownloadError ?? new Error("MinerU zip download returned no data")
   const zip = await JSZip.loadAsync(buffer)
 
-  // Official MinerU result archives contain full.md. Prefer it; fall
-  // back to another Markdown file only for compatibility with older or
-  // unusual archives.
+  // Official MinerU result archives contain full.md. An arbitrary secondary
+  // Markdown file may represent only one page or an intermediate artifact, so
+  // accepting it would silently ingest an incomplete document.
   const mdEntries: [string, JSZip.JSZipObject][] = []
   zip.forEach((relativePath, file) => {
     if (!file.dir && relativePath.endsWith(".md")) {
@@ -681,27 +696,36 @@ async function downloadAndExtractMarkdown(
   const fullMd = mdEntries.find(([relativePath]) =>
     relativePath.split("/").pop()?.toLowerCase() === "full.md"
   )
-  const markdown = await (fullMd ?? mdEntries[0])[1].async("string")
+  if (!fullMd) {
+    throw new Error("MinerU result zip did not contain full.md; PDF ingest was stopped to avoid using a partial Markdown file")
+  }
+  const markdown = await fullMd[1].async("string")
   const markdownWithTables = convertHtmlTablesToMarkdown(markdown)
   const processedPageCount = await countMineruStructuredPages(zip)
   if (!assetOptions) return { markdown: markdownWithTables, savedImages: [], processedPageCount }
 
   try {
     const { pathMap, savedImages } = await saveMineruZipImages(zip, assetOptions, signal)
-    return {
-      markdown: pathMap.size > 0
+    const rewrittenMarkdown = pathMap.size > 0
       ? rewriteMineruMarkdownImages(markdownWithTables, pathMap)
-      : markdownWithTables,
+      : markdownWithTables
+    const unresolvedImageRefs = unresolvedLocalImageRefs(rewrittenMarkdown)
+    if (unresolvedImageRefs.length > 0) {
+      throw new Error(
+        `MinerU result is missing ${unresolvedImageRefs.length} referenced image asset(s): ${unresolvedImageRefs.slice(0, 5).join(", ")}`,
+      )
+    }
+    return {
+      markdown: rewrittenMarkdown,
       savedImages,
       processedPageCount,
     }
   } catch (err) {
     if (signal?.aborted) throw err
-    console.warn(
-      "[MinerU] failed to save extracted images; keeping parsed Markdown text:",
-      err instanceof Error ? err.message : err,
+    const message = err instanceof Error ? err.message : String(err)
+    throw new Error(
+      `MinerU result images could not be saved; PDF ingest must stop instead of dropping them: ${message}`,
     )
-    return { markdown: markdownWithTables, savedImages: [], processedPageCount }
   }
 }
 

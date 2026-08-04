@@ -79,13 +79,13 @@ describe("MinerU API helpers", () => {
       .resolves.toBe("full markdown")
   })
 
-  it("falls back to another markdown file when full.md is missing", async () => {
+  it("rejects a MinerU archive when full.md is missing", async () => {
     mockHttpFetch.mockResolvedValueOnce(await zipResponse({
       "result/page.md": "fallback markdown",
     }))
 
     await expect(__mineruTest.downloadAndExtractMarkdown("https://cdn/result.zip"))
-      .resolves.toBe("fallback markdown")
+      .rejects.toThrow("did not contain full.md")
   })
 
   it("rejects MinerU zip files without markdown output", async () => {
@@ -307,24 +307,21 @@ describe("MinerU API helpers", () => {
     expect(markdown).toBe("![Evil](media/paper/mineru/evil.png)")
   })
 
-  it("does not use basename fallback when zip image basenames collide", async () => {
+  it("rejects ambiguous image references when zip image basenames collide", async () => {
     mockHttpFetch.mockResolvedValueOnce(await zipResponse({
       "full.md": "![Ambiguous](chart.png)\n![A](a/chart.png)",
       "a/chart.png": "a-bytes",
       "b/chart.png": "b-bytes",
     }))
 
-    const markdown = await __mineruTest.downloadAndExtractMarkdown(
+    await expect(__mineruTest.downloadAndExtractMarkdown(
       "https://cdn/result.zip",
       undefined,
       { projectPath: "/project", sourceSummarySlug: "paper" },
-    )
-
-    expect(markdown).toContain("![Ambiguous](chart.png)")
-    expect(markdown).toContain("![A](media/paper/mineru/a/chart.png)")
+    )).rejects.toThrow("missing 1 referenced image asset")
   })
 
-  it("keeps parsed Markdown when extracted image saving fails", async () => {
+  it("rejects the MinerU result when extracted images cannot be saved", async () => {
     fsMocks.writeFileBase64.mockRejectedValueOnce(new Error("disk full"))
     mockHttpFetch.mockResolvedValueOnce(await zipResponse({
       "full.md": "![Chart](images/chart.png)\nBody",
@@ -335,7 +332,7 @@ describe("MinerU API helpers", () => {
       "https://cdn/result.zip",
       undefined,
       { projectPath: "/project", sourceSummarySlug: "paper" },
-    )).resolves.toBe("![Chart](images/chart.png)\nBody")
+    )).rejects.toThrow("PDF ingest must stop instead of dropping them: disk full")
   })
 
   it("leaves external HTML image tags untouched", async () => {

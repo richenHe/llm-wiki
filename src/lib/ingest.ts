@@ -36,7 +36,6 @@ import type { FileNode } from "@/types/wiki"
 import {
   extractAndSaveSourceImages,
   extractAndSaveMarkdownImages,
-  renderAndSavePdfPages,
   buildImageMarkdownSection,
   type SavedImage,
 } from "@/lib/extract-source-images"
@@ -53,7 +52,6 @@ import {
 } from "@/lib/ingest-integrity"
 import {
   buildDocumentPipelineSignature,
-  countBuiltinPdfPages,
   documentIntegrityFailures,
   type DocumentIngestResult,
 } from "@/lib/document-ingest-result"
@@ -70,7 +68,7 @@ import {
   type IngestGenerationCheckpoint,
   type StoredWrittenFile,
 } from "@/lib/ingest-generation-checkpoint"
-import { IngestNeedsAttentionError } from "@/lib/ingest-errors"
+import { IngestNeedsAttentionError, IngestQueuePauseError } from "@/lib/ingest-errors"
 
 const LONG_SOURCE_MIN_BUDGET = 8_000
 const LONG_SOURCE_MAX_SINGLE_PASS_BUDGET = 300_000
@@ -821,8 +819,11 @@ async function autoIngestImpl(
   const preparationWarnings: string[] = []
   let sourcePageCount: number | null = null
 
+  // MinerU is the sole content extractor for PDFs. Do not open the PDF through
+  // the built-in text/image pipeline before MinerU runs: that would silently
+  // create a second, lower-quality source of truth.
   const [builtinSourceContent, schema, purpose, index, overview] = await Promise.all([
-    tryReadSourceTextFile(sp),
+    isPdf ? Promise.resolve("") : tryReadSourceTextFile(sp),
     tryReadFile(`${pp}/schema.md`),
     tryReadFile(`${pp}/purpose.md`),
     tryReadFile(`${pp}/wiki/index.md`),
@@ -886,6 +887,13 @@ async function autoIngestImpl(
 
   let canonicalSourceContent = builtinSourceContent
   const mineruConfigured = mineruCfg.backend === "local" || Boolean(mineruCfg.token)
+  if (isPdf && (!mineruCfg.enabled || !mineruConfigured)) {
+    const message = !mineruCfg.enabled
+      ? "PDF ingest requires MinerU, but MinerU is disabled. The queue was paused; no built-in extraction, page rendering, or vision-model calls were started."
+      : "PDF ingest requires MinerU, but MinerU is not configured. The queue was paused; no built-in extraction, page rendering, or vision-model calls were started."
+    activity.updateItem(activityId, { status: "error", detail: message })
+    throw new IngestQueuePauseError(message)
+  }
   if (isPdf && mineruCfg.enabled && mineruConfigured) {
     try {
       const cacheDir = sp.substring(0, sp.lastIndexOf("/"))
@@ -963,17 +971,15 @@ async function autoIngestImpl(
     } catch (err) {
       throwIfIngestAborted(signal, activityId)
       const msg = trimInlineStatus(err instanceof Error ? err.message : String(err))
-      console.warn(`[ingest:mineru] MinerU parsing failed, falling back to pdfium: ${msg}`)
-      preparationWarnings.push(`MinerU failed; built-in PDF extraction was used instead: ${msg}`)
-      activity.updateItem(activityId, {
-        detail: `MinerU failed, falling back to built-in PDF extraction: ${msg}`,
-      })
+      const message = `MinerU failed, so PDF ingest was paused. No built-in extraction, page rendering, or vision-model calls were started: ${msg}`
+      console.warn(`[ingest:mineru] ${message}`)
+      await appendIngestWarningLog(pp, sourceIdentity, [message])
+      activity.updateItem(activityId, { status: "error", detail: message })
+      throw new IngestQueuePauseError(message)
     }
     if (mineruSucceeded && !signal?.aborted) {
       activity.updateItem(activityId, { detail: "Reading source..." })
     }
-  } else if (isPdf && mineruCfg.enabled && !mineruConfigured) {
-    preparationWarnings.push("MinerU is enabled but not configured; built-in PDF extraction was used instead.")
   }
 
   const sourceContent = canonicalSourceContent
@@ -987,13 +993,13 @@ async function autoIngestImpl(
 
   const documentResult: DocumentIngestResult = {
     content: sourceContent,
-    extractionMode: isPdf ? (mineruSucceeded ? "mineru" : "builtin") : "text",
+    extractionMode: isPdf ? "mineru" : "text",
     sourcePageCount,
     processedPageCount: isPdf
-      ? (mineruSucceeded ? mineruProcessedPageCount : countBuiltinPdfPages(sourceContent))
+      ? mineruProcessedPageCount
       : null,
     savedImages: mineruSavedImages,
-    degraded: isPdf && mineruCfg.enabled && !mineruSucceeded,
+    degraded: false,
     warnings: preparationWarnings,
   }
   if (isPdf && mineruSucceeded && mineruProcessedPageCount === null) {
@@ -1075,29 +1081,13 @@ async function autoIngestImpl(
   // and returns [] on any error.
   activity.updateItem(activityId, { detail: "Extracting embedded images..." })
   console.log(`[ingest:diag] full-pipeline branch: starting image extraction for ${sp}`)
-  let savedImages = mineruSucceeded
+  let savedImages = isPdf
     ? mineruSavedImages
     : await extractAndSaveSourceImages(pp, sp, sourceSummarySlug)
-  const markdownImages = mineruSucceeded
+  const markdownImages = isPdf
     ? []
     : await extractAndSaveMarkdownImages(pp, sp, sourceContent, sourceSummarySlug)
   savedImages = [...savedImages, ...markdownImages]
-  const visualConfigForFallback = useWikiStore.getState().multimodalConfig
-  if (isPdf && !mineruSucceeded && visualConfigForFallback.enabled && savedImages.length === 0) {
-    activity.updateItem(activityId, {
-      detail: "No extractable images found; rendering PDF pages for visual coverage...",
-    })
-    try {
-      savedImages = await renderAndSavePdfPages(pp, sp, sourceSummarySlug)
-      preparationWarnings.push(
-        `MinerU was unavailable and the PDF exposed no independent images; ${savedImages.length} page rendering(s) were used for visual coverage.`,
-      )
-    } catch (err) {
-      preprocessingFailures.push(
-        `PDF visual fallback failed: ${err instanceof Error ? err.message : String(err)}`,
-      )
-    }
-  }
   console.log(`[ingest:diag] full-pipeline branch: got ${savedImages.length} image(s)`)
   if (savedImages.length > 0) {
     console.log(

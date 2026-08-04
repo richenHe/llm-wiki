@@ -4,7 +4,7 @@ import { normalizePath, isAbsolutePath } from "@/lib/path-utils"
 import { getProjectPathById } from "@/lib/project-identity"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
-import { isIngestNeedsAttentionError } from "@/lib/ingest-errors"
+import { isIngestNeedsAttentionError, isIngestQueuePauseError } from "@/lib/ingest-errors"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -802,6 +802,15 @@ async function processNext(projectId: string): Promise<void> {
       return
     }
     const message = err instanceof Error ? err.message : String(err)
+    if (isIngestQueuePauseError(err)) {
+      next.status = "pending"
+      next.error = message
+      paused = true
+      processing = false
+      await saveQueue(pp)
+      console.log(`[Ingest Queue] Paused for source repair: ${next.sourcePath} — ${message}`)
+      return
+    }
     if (isIngestNeedsAttentionError(err)) {
       next.retryCount++
       next.status = "failed"

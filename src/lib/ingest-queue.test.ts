@@ -71,7 +71,7 @@ import { autoIngest } from "./ingest"
 import { readFile, writeFile } from "@/commands/fs"
 import { sweepResolvedReviews } from "./sweep-reviews"
 import { useWikiStore } from "@/stores/wiki-store"
-import { IngestNeedsAttentionError } from "./ingest-errors"
+import { IngestNeedsAttentionError, IngestQueuePauseError } from "./ingest-errors"
 
 const mockAutoIngest = vi.mocked(autoIngest)
 const mockReadFile = vi.mocked(readFile)
@@ -157,6 +157,29 @@ describe("ingest-queue — enqueue & basic processing", () => {
 })
 
 describe("ingest-queue — retry & failure", () => {
+  it("pauses the whole queue when the current source requires MinerU repair", async () => {
+    mockAutoIngest.mockRejectedValueOnce(
+      new IngestQueuePauseError("MinerU ZIP download failed; no fallback was started"),
+    )
+
+    await enqueueBatch(TEST_ID, [
+      { sourcePath: "first.pdf", folderContext: "" },
+      { sourcePath: "second.pdf", folderContext: "" },
+    ])
+    await flushMicrotasks(20)
+
+    expect(mockAutoIngest).toHaveBeenCalledOnce()
+    expect(getQueue()).toHaveLength(2)
+    expect(getQueue()[0]).toMatchObject({
+      sourcePath: "first.pdf",
+      status: "pending",
+      retryCount: 0,
+    })
+    expect(getQueue()[0].error).toContain("MinerU ZIP download failed")
+    expect(getQueue()[1]).toMatchObject({ sourcePath: "second.pdf", status: "pending" })
+    expect(getQueueSummary()).toMatchObject({ paused: true, processing: 0, pending: 2 })
+  })
+
   it("does not repeat a whole source when only targeted knowledge pages need attention", async () => {
     mockAutoIngest.mockRejectedValue(
       new IngestNeedsAttentionError("2 expected pages remain; saved progress is reusable"),
