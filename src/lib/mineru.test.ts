@@ -2,9 +2,16 @@ import JSZip from "jszip"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const mockHttpFetch = vi.fn<(url: string, opts?: RequestInit) => Promise<Response>>()
+const directDownloadMocks = vi.hoisted(() => ({
+  download: vi.fn<(url: string) => Promise<ArrayBuffer>>(),
+}))
 
 vi.mock("@/lib/tauri-fetch", () => ({
   getHttpFetch: () => Promise.resolve(mockHttpFetch),
+}))
+
+vi.mock("@/lib/mineru-direct-download", () => ({
+  downloadMineruZipDirect: directDownloadMocks.download,
 }))
 
 const fsMocks = vi.hoisted(() => ({
@@ -46,6 +53,7 @@ async function zipResponse(files: Record<string, string>): Promise<Response> {
 
 beforeEach(() => {
   mockHttpFetch.mockReset()
+  directDownloadMocks.download.mockReset()
   fsMocks.createDirectory.mockReset()
   fsMocks.getFileSize.mockReset()
   fsMocks.readFileAsBase64.mockReset()
@@ -60,6 +68,42 @@ beforeEach(() => {
 })
 
 describe("MinerU API helpers", () => {
+  it("uses the secure direct MinerU route when the proxied download fails", async () => {
+    mockHttpFetch.mockRejectedValue(new TypeError("TLS handshake failed"))
+    directDownloadMocks.download.mockResolvedValueOnce(
+      await (await zipResponse({ "full.md": "direct markdown" })).arrayBuffer(),
+    )
+
+    await expect(__mineruTest.downloadAndExtractMarkdown(
+      "https://cdn-mineru.openxlab.org.cn/result.zip",
+    )).resolves.toBe("direct markdown")
+
+    expect(mockHttpFetch).toHaveBeenCalledTimes(2)
+    expect(directDownloadMocks.download).toHaveBeenCalledWith(
+      "https://cdn-mineru.openxlab.org.cn/result.zip",
+    )
+  })
+
+  it("reports both route failures without starting another extraction path", async () => {
+    mockHttpFetch.mockRejectedValue(new TypeError("proxy TLS failed"))
+    directDownloadMocks.download.mockRejectedValueOnce(new Error("direct connection failed"))
+
+    await expect(__mineruTest.downloadAndExtractMarkdown(
+      "https://cdn-mineru.openxlab.org.cn/result.zip",
+    )).rejects.toThrow(
+      "both the normal route (proxy TLS failed) and the secure direct route (direct connection failed)",
+    )
+  })
+
+  it("does not bypass an HTTP 4xx response with the direct route", async () => {
+    mockHttpFetch.mockResolvedValueOnce(new Response("expired", { status: 403 }))
+
+    await expect(__mineruTest.downloadAndExtractMarkdown(
+      "https://cdn-mineru.openxlab.org.cn/result.zip",
+    )).rejects.toThrow("HTTP 403")
+    expect(directDownloadMocks.download).not.toHaveBeenCalled()
+  })
+
   it("maps official API error codes to actionable messages", () => {
     expect(__mineruTest.mineruApiErrorMessage("A0202", "bad token")).toContain("invalid")
     expect(__mineruTest.mineruApiErrorMessage("A0211", "expired")).toContain("expired")
@@ -708,6 +752,46 @@ describe("parseWithMineru", () => {
       token: "token",
       modelVersion: "vlm",
     }, "/tmp/doc.pdf")).rejects.toThrow("parse exploded")
+  })
+
+  it("refreshes an expired ZIP address without re-uploading the PDF", async () => {
+    mockHttpFetch
+      .mockResolvedValueOnce(jsonResponse({
+        code: 0,
+        msg: "ok",
+        data: { batch_id: "batch-1", file_urls: ["https://upload"] },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse({
+        code: 0,
+        msg: "ok",
+        data: {
+          batch_id: "batch-1",
+          extract_result: [{ file_name: "doc.pdf", state: "done", full_zip_url: "https://old.zip" }],
+        },
+      }))
+      .mockResolvedValueOnce(new Response("expired", { status: 403 }))
+      .mockResolvedValueOnce(jsonResponse({
+        code: 0,
+        msg: "ok",
+        data: {
+          batch_id: "batch-1",
+          extract_result: [{ file_name: "doc.pdf", state: "done", full_zip_url: "https://fresh.zip" }],
+        },
+      }))
+      .mockResolvedValueOnce(await zipResponse({ "full.md": "fresh markdown" }))
+
+    const progress: string[] = []
+    await expect(parseWithMineru({
+      enabled: true,
+      token: "token",
+      modelVersion: "vlm",
+    }, "/tmp/doc.pdf", undefined, (message) => progress.push(message)))
+      .resolves.toBe("fresh markdown")
+
+    expect(fsMocks.readFileAsBase64).toHaveBeenCalledOnce()
+    expect(progress).toContain("MinerU download address expired; requesting a fresh address...")
+    expect(directDownloadMocks.download).not.toHaveBeenCalled()
   })
 
   it("stops polling immediately when the abort signal fires during the poll interval", async () => {

@@ -685,6 +685,7 @@ pub fn run() {
             commands::extract_images::extract_and_save_pdf_images_cmd,
             commands::extract_images::render_and_save_pdf_pages_cmd,
             commands::extract_images::extract_and_save_office_images_cmd,
+            commands::mineru_download::download_mineru_zip_direct_cmd,
             commands::file_sync::start_project_file_watcher,
             commands::file_sync::stop_project_file_watcher,
             commands::file_sync::rescan_project_files,

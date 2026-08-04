@@ -2,6 +2,7 @@ import JSZip from "jszip"
 import type { MineruConfig } from "@/stores/wiki-store"
 import { createDirectory, getFileSize, readFileAsBase64, writeFileBase64 } from "@/commands/fs"
 import { getHttpFetch } from "@/lib/tauri-fetch"
+import { downloadMineruZipDirect } from "@/lib/mineru-direct-download"
 import { getFileName, normalizePath } from "@/lib/path-utils"
 import type { SavedImage } from "@/lib/extract-source-images"
 
@@ -11,6 +12,8 @@ const POLL_INTERVAL_MS = 3_000
 const POLL_TIMEOUT_MS = 300_000 // 5 minutes
 const LOCAL_POLL_TIMEOUT_MS = 3_600_000 // Official mineru-api tasks can include model cold starts.
 const MAX_ACCURATE_PARSE_BYTES = 200 * 1024 * 1024
+const ZIP_DOWNLOAD_ATTEMPTS = 2
+const ZIP_DOWNLOAD_RETRY_MS = 500
 const MINERU_IMAGE_EXTS = new Set([
   "png",
   "jpg",
@@ -78,6 +81,18 @@ interface MineruExtractedMarkdown {
   savedImages: SavedImage[]
   /** Last page represented by MinerU's structured result, when available. */
   processedPageCount?: number | null
+}
+
+class MineruZipHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`MinerU zip download failed: HTTP ${status}`)
+    this.name = "MineruZipHttpError"
+  }
+}
+
+function isExpiredMineruZipError(error: unknown): boolean {
+  return error instanceof MineruZipHttpError
+    && [401, 403, 404, 410].includes(error.status)
 }
 
 function collectMineruPageNumbers(value: unknown, pages: Set<number>): void {
@@ -653,11 +668,12 @@ async function downloadAndExtractMarkdown(
   zipUrl: string,
   signal?: AbortSignal,
   assetOptions?: MineruAssetOptions,
+  onProgress?: (msg: string) => void,
 ): Promise<MineruExtractedMarkdown> {
   const httpFetch = await getHttpFetch()
   let buffer: ArrayBuffer | null = null
   let lastDownloadError: Error | null = null
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= ZIP_DOWNLOAD_ATTEMPTS; attempt++) {
     throwIfAborted(signal)
     try {
       const res = await httpFetch(zipUrl, { signal })
@@ -665,18 +681,32 @@ async function downloadAndExtractMarkdown(
         buffer = await res.arrayBuffer()
         break
       }
-      lastDownloadError = new Error(`MinerU zip download failed: HTTP ${res.status}`)
-      if (res.status < 500 || attempt >= 3) throw lastDownloadError
+      lastDownloadError = new MineruZipHttpError(res.status)
+      if (res.status < 500) throw lastDownloadError
     } catch (err) {
       throwIfAborted(signal)
       lastDownloadError = err instanceof Error ? err : new Error(String(err))
-      if (/HTTP 4\d\d\b/.test(lastDownloadError.message) || attempt >= 3) {
+      if (lastDownloadError instanceof MineruZipHttpError && lastDownloadError.status < 500) {
         throw lastDownloadError
       }
     }
-    await waitForPollInterval(signal)
+    if (attempt < ZIP_DOWNLOAD_ATTEMPTS) await waitForZipDownloadRetry(signal)
   }
-  if (!buffer) throw lastDownloadError ?? new Error("MinerU zip download returned no data")
+  if (!buffer) {
+    throwIfAborted(signal)
+    onProgress?.("Proxy download failed; retrying MinerU CDN directly...")
+    try {
+      buffer = await downloadMineruZipDirect(zipUrl)
+      throwIfAborted(signal)
+    } catch (directError) {
+      throwIfAborted(signal)
+      const normalMessage = lastDownloadError?.message ?? "no response"
+      const directMessage = directError instanceof Error ? directError.message : String(directError)
+      throw new Error(
+        `MinerU ZIP download failed through both the normal route (${normalMessage}) and the secure direct route (${directMessage})`,
+      )
+    }
+  }
   const zip = await JSZip.loadAsync(buffer)
 
   // Official MinerU result archives contain full.md. An arbitrary secondary
@@ -727,6 +757,22 @@ async function downloadAndExtractMarkdown(
       `MinerU result images could not be saved; PDF ingest must stop instead of dropping them: ${message}`,
     )
   }
+}
+
+function waitForZipDownloadRetry(signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal)
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }, ZIP_DOWNLOAD_RETRY_MS)
+    const onAbort = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+      reject(new Error("MinerU parsing cancelled"))
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
 }
 
 // ── Local backend ──
@@ -924,12 +970,14 @@ export async function parseWithMineruResult(
   }
 
   let zipUrl: string
+  let refreshZipUrl: (() => Promise<string>) | null = null
 
   if (sourceUrl) {
     onProgress?.("Submitting URL to MinerU...")
     const taskId = await submitUrlTask(config.token, sourceUrl, config.modelVersion, signal)
     onProgress?.("Waiting for MinerU to finish...")
-    zipUrl = await pollTask(config.token, taskId, signal)
+    refreshZipUrl = () => pollTask(config.token, taskId, signal)
+    zipUrl = await refreshZipUrl()
   } else {
     onProgress?.("Uploading file to MinerU...")
     throwIfAborted(signal)
@@ -951,11 +999,20 @@ export async function parseWithMineruResult(
       signal,
     )
     onProgress?.("Waiting for MinerU to finish...")
-    zipUrl = await pollBatchTask(config.token, batchId, signal)
+    refreshZipUrl = () => pollBatchTask(config.token, batchId, signal)
+    zipUrl = await refreshZipUrl()
   }
 
   onProgress?.("Downloading parsed result...")
-  const result = await downloadAndExtractMarkdown(zipUrl, signal, assetOptions)
+  let result: MineruExtractedMarkdown
+  try {
+    result = await downloadAndExtractMarkdown(zipUrl, signal, assetOptions, onProgress)
+  } catch (error) {
+    if (!isExpiredMineruZipError(error) || !refreshZipUrl) throw error
+    onProgress?.("MinerU download address expired; requesting a fresh address...")
+    zipUrl = await refreshZipUrl()
+    result = await downloadAndExtractMarkdown(zipUrl, signal, assetOptions, onProgress)
+  }
   onProgress?.("Done")
 
   return result
