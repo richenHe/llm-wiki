@@ -16,7 +16,7 @@ import type { LlmConfig } from "@/stores/wiki-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { parseWithMineruResult } from "@/lib/mineru"
 import { useChatStore } from "@/stores/chat-store"
-import { useActivityStore } from "@/stores/activity-store"
+import { ingestActivityKey, useActivityStore } from "@/stores/activity-store"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { getFileName, normalizePath } from "@/lib/path-utils"
 import {
@@ -721,9 +721,26 @@ export async function autoIngest(
   folderContext?: string,
   onFileWritten?: (relativePath: string) => void,
 ): Promise<string[]> {
-  return withProjectLock(normalizePath(projectPath), () =>
-    autoIngestImpl(projectPath, sourcePath, llmConfig, signal, folderContext, onFileWritten),
-  )
+  const activityKey = ingestActivityKey(projectPath, sourcePath)
+  return withProjectLock(normalizePath(projectPath), async () => {
+    try {
+      return await autoIngestImpl(projectPath, sourcePath, llmConfig, signal, folderContext, onFileWritten)
+    } catch (err) {
+      const activity = useActivityStore.getState()
+      const activeItem = activity.items.find((item) =>
+        item.type === "ingest" &&
+        item.activityKey === activityKey &&
+        item.status === "running"
+      )
+      if (activeItem) {
+        activity.updateItem(activeItem.id, {
+          status: "error",
+          detail: err instanceof Error ? err.message : String(err),
+        })
+      }
+      throw err
+    }
+  })
 }
 
 function throwIfIngestAborted(signal: AbortSignal | undefined, activityId?: string): void {
@@ -796,14 +813,28 @@ async function autoIngestImpl(
   const sourceIdentity = sourceIdentityForPath(pp, sp)
   const sourceSummarySlug = sourceSummarySlugFromIdentity(sourceIdentity)
   const sourceSummaryPath = `wiki/sources/${sourceSummarySlug}.md`
+  const currentActivityKey = ingestActivityKey(pp, sp)
   console.log(`[ingest:diag] autoIngestImpl ENTRY for "${fileName}" (project="${pp}", source="${sp}")`)
-  const activityId = activity.addItem({
+  const reusableActivity = activity.items.find((item) =>
+    item.type === "ingest" &&
+    item.activityKey === currentActivityKey &&
+    item.status !== "done"
+  )
+  const activityId = reusableActivity?.id ?? activity.addItem({
     type: "ingest",
+    activityKey: currentActivityKey,
     title: fileName,
     status: "running",
     detail: "Reading source...",
     filesWritten: [],
   })
+  if (reusableActivity) {
+    activity.updateItem(reusableActivity.id, {
+      status: "running",
+      detail: "Reading source...",
+      filesWritten: [],
+    })
+  }
   const modelCalls = emptyIngestModelCallCounts()
 
   // ── Canonical document preparation ───────────────────────────

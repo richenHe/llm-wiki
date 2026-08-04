@@ -5,7 +5,7 @@ import {
   RotateCcw, X, Clock, TrendingUp, Target, Pause, Play,
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
-import { useActivityStore, type ActivityItem } from "@/stores/activity-store"
+import { hasRunningIngestActivity, useActivityStore, type ActivityItem } from "@/stores/activity-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useFileSyncStore } from "@/stores/file-sync-store"
 import { normalizePath, getFileName, isAbsolutePath } from "@/lib/path-utils"
@@ -341,7 +341,10 @@ export function ActivityPanel() {
           )}
 
           {/* Queue tasks */}
-          {queueTasks.filter((t) => t.status === "processing").map((task) => (
+          {queueTasks.filter((task) =>
+            task.status === "processing" &&
+            (!project || !hasRunningIngestActivity(items, project.path, task.sourcePath))
+          ).map((task) => (
             <QueueRow key={task.id} task={task} onRetry={handleIngestRetry} onCancel={handleIngestCancel} />
           ))}
           {queueTasks.filter((t) => t.status === "pending").map((task) => (

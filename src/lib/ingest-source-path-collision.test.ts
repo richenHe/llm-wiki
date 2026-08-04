@@ -682,11 +682,23 @@ describe("autoIngest source summary paths", () => {
       autoIngest(tmp.path, longSourcePath, llmConfig, undefined, "project-a"),
     ).rejects.toThrow("Chunk analysis stream failed")
 
+    const failedActivities = useActivityStore.getState().items.filter((item) => item.type === "ingest")
+    expect(failedActivities).toHaveLength(1)
+    expect(failedActivities[0]).toMatchObject({
+      status: "error",
+      detail: expect.stringContaining("Chunk analysis stream failed"),
+    })
+    const activityId = failedActivities[0].id
+
     const progressDir = path.join(tmp.path, ".llm-wiki", "ingest-progress")
     expect((await fs.readdir(progressDir)).filter((name) => name.endsWith(".json"))).toHaveLength(1)
 
     mockStreamChat.mockClear()
     await autoIngest(tmp.path, longSourcePath, llmConfig, undefined, "project-a")
+
+    const resumedActivities = useActivityStore.getState().items.filter((item) => item.type === "ingest")
+    expect(resumedActivities).toHaveLength(1)
+    expect(resumedActivities[0]).toMatchObject({ id: activityId, status: "done" })
 
     const resumedChunkCalls = mockStreamChat.mock.calls.filter(([, messages]) =>
       String(messages?.[0]?.content ?? "").startsWith("You are analyzing a long source document"),
