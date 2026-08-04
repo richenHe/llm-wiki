@@ -1013,6 +1013,90 @@ pub async fn extract_pdf_images_cmd(path: String) -> Result<Vec<ExtractedImage>,
     .map_err(|e| format!("extract_pdf_images blocking task join error: {e}"))?
 }
 
+/// Last-resort visual fallback for PDFs whose page artwork cannot be exposed
+/// as independent raster objects (common in scans and vector-heavy textbooks).
+/// This is intentionally called only after MinerU and native image extraction
+/// produced no usable images; rendering every page is too expensive for the
+/// normal path but is safer than silently losing all visual knowledge.
+pub fn render_and_save_pdf_pages(
+    path: &str,
+    dest_dir: &Path,
+    rel_to: &Path,
+) -> Result<Vec<SavedImage>, String> {
+    use pdfium_render::prelude::*;
+
+    let _guard = crate::commands::fs::lock_pdfium();
+    let pdfium = crate::commands::fs::pdfium()?;
+    let doc = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| format!("Failed to open PDF '{path}': {e}"))?;
+    let config = PdfRenderConfig::new().set_target_width(1600);
+    let mut out = Vec::with_capacity(doc.pages().len().max(0) as usize);
+
+    for (page_idx, page) in doc.pages().iter().enumerate() {
+        let bitmap = page.render_with_config(&config).map_err(|e| {
+            format!(
+                "Failed to render PDF page {} in '{path}': {e}",
+                page_idx + 1
+            )
+        })?;
+        let image = bitmap.as_image().map_err(|e| {
+            format!(
+                "Failed to convert PDF page {} to image in '{path}': {e}",
+                page_idx + 1
+            )
+        })?;
+        let width = image.width();
+        let height = image.height();
+        let mut png_bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut png_bytes),
+                image::ImageFormat::Png,
+            )
+            .map_err(|e| {
+                format!(
+                    "Failed to encode PDF page {} in '{path}': {e}",
+                    page_idx + 1
+                )
+            })?;
+        let file_name = format!("page-{:04}.png", page_idx + 1);
+        let (rel_path, abs_path) = save_one_image(&png_bytes, dest_dir, rel_to, &file_name)?;
+        let sha256 = format!("{:x}", Sha256::digest(&png_bytes));
+        out.push(SavedImage {
+            index: (page_idx + 1) as u32,
+            mime_type: "image/png".to_string(),
+            page: Some((page_idx + 1) as u32),
+            width,
+            height,
+            rel_path,
+            abs_path,
+            sha256,
+        });
+    }
+
+    Ok(out)
+}
+
+/// Return the authoritative page count without rendering or extracting the
+/// document.  The ingest pipeline uses this as its page-coverage baseline, so
+/// a parser that silently returns fewer pages cannot still be marked complete.
+#[tauri::command]
+pub async fn get_pdf_page_count_cmd(path: String) -> Result<u32, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::panic_guard::run_guarded("get_pdf_page_count", || {
+            let _guard = crate::commands::fs::lock_pdfium();
+            let pdfium = crate::commands::fs::pdfium()?;
+            let document = pdfium
+                .load_pdf_from_file(&path, None)
+                .map_err(|e| format!("Failed to open PDF '{path}': {e}"))?;
+            Ok(document.pages().len() as u32)
+        })
+    })
+    .await
+    .map_err(|e| format!("get_pdf_page_count blocking task join error: {e}"))?
+}
+
 #[tauri::command]
 pub async fn extract_office_images_cmd(path: String) -> Result<Vec<ExtractedImage>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -1042,6 +1126,21 @@ pub async fn extract_and_save_pdf_images_cmd(
     })
     .await
     .map_err(|e| format!("extract_and_save_pdf_images blocking task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn render_and_save_pdf_pages_cmd(
+    source_path: String,
+    dest_dir: String,
+    rel_to: String,
+) -> Result<Vec<SavedImage>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::panic_guard::run_guarded("render_and_save_pdf_pages", || {
+            render_and_save_pdf_pages(&source_path, Path::new(&dest_dir), Path::new(&rel_to))
+        })
+    })
+    .await
+    .map_err(|e| format!("render_and_save_pdf_pages blocking task join error: {e}"))?
 }
 
 #[tauri::command]

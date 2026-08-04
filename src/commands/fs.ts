@@ -141,6 +141,11 @@ export async function getFileMd5(path: string): Promise<string> {
   return invoke<string>("get_file_md5", { path })
 }
 
+/** Authoritative PDF page count from PDFium, without rendering the pages. */
+export async function getPdfPageCount(path: string): Promise<number> {
+  return invoke<number>("get_pdf_page_count_cmd", { path })
+}
+
 export interface FileHistoryEntry {
   id: string
   path: string

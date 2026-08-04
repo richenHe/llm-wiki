@@ -11,6 +11,10 @@ interface CacheEntry {
   hash: string
   timestamp: number
   filesWritten: string[]
+  /** Versioned extraction/generation settings that produced this entry. */
+  pipelineSignature?: string
+  /** Non-Wiki artifacts required for a complete cache hit, e.g. media files. */
+  artifacts?: string[]
 }
 
 interface CacheData {
@@ -75,16 +79,21 @@ export async function checkIngestCache(
   projectPath: string,
   sourceFileName: string,
   sourceContent: string,
+  pipelineSignature: string = "document-pipeline-v2",
 ): Promise<string[] | null> {
   const cache = await loadCache(projectPath)
   const entry = cache.entries[sourceFileName]
   if (!entry) return null
+  // Legacy entries did not record which extractor, image settings, or
+  // generation contract produced them. Re-run once instead of claiming that
+  // an old text-only ingest satisfies the current multimodal pipeline.
+  if (entry.pipelineSignature !== pipelineSignature) return null
 
   const currentHash = await sha256(sourceContent)
   if (entry.hash !== currentHash) return null
 
   const pp = normalizePath(projectPath)
-  for (const filePath of entry.filesWritten) {
+  for (const filePath of [...entry.filesWritten, ...(entry.artifacts ?? [])]) {
     const fullPath = isAbsolutePath(filePath)
       ? normalizePath(filePath)
       : `${pp}/${filePath}`
@@ -113,6 +122,8 @@ export async function saveIngestCache(
   sourceFileName: string,
   sourceContent: string,
   filesWritten: string[],
+  pipelineSignature: string = "document-pipeline-v2",
+  artifacts: string[] = [],
 ): Promise<void> {
   const cache = await loadCache(projectPath)
   const hash = await sha256(sourceContent)
@@ -121,6 +132,8 @@ export async function saveIngestCache(
     hash,
     timestamp: Date.now(),
     filesWritten,
+    pipelineSignature,
+    artifacts,
   }
   await saveCache(projectPath, { entries: newEntries })
 }

@@ -70,9 +70,8 @@ export const ingestScenarios: IngestScenario[] = [
       "## Main Arguments",
       "- RoPE naturally supports variable-length contexts",
       "",
-      "## Recommendations",
-      "- Create wiki/concepts/rope.md",
-      "- Create wiki/sources/rope-paper.md",
+      "## Generation Contract",
+      "- [[concepts/rope]]",
     ].join("\n"),
     generationResponse: [
       "I'll create one concept page and the source summary.",
@@ -133,7 +132,7 @@ export const ingestScenarios: IngestScenario[] = [
       content:
         "# FlashAttention\n\nFlashAttention is an IO-aware exact attention algorithm.\n",
     },
-    analysisResponse: "## Key Concepts\n- FlashAttention\n",
+    analysisResponse: "## Key Concepts\n- FlashAttention\n\n## Generation Contract\n- No dedicated knowledge page is required.\n",
     generationResponse: [
       "---FILE: wiki/sources/flash-attention.md---",
       "---",
@@ -184,7 +183,9 @@ export const ingestScenarios: IngestScenario[] = [
     },
     analysisResponse:
       "## Connections to Existing Wiki\n" +
-      "- Multi-head attention is a variant of attention — existing [[attention]] page should be linked.\n",
+      "- Multi-head attention is a variant of attention — existing [[attention]] page should be linked.\n\n" +
+      "## Generation Contract\n" +
+      "- [[concepts/multi-head-attention]]\n",
     generationResponse: [
       "---FILE: wiki/concepts/multi-head-attention.md---",
       "---",
@@ -232,7 +233,7 @@ export const ingestScenarios: IngestScenario[] = [
       path: "raw/sources/transformer-survey.md",
       content: "# Transformer 综述\n\nTransformer 是一种基于注意力机制的神经网络架构。\n",
     },
-    analysisResponse: "## 核心概念\n- Transformer：基于注意力机制的架构\n",
+    analysisResponse: "## 核心概念\n- Transformer：基于注意力机制的架构\n\n## Generation Contract\n- [[concepts/transformer]]\n",
     generationResponse: [
       "---FILE: wiki/concepts/transformer.md---",
       "---",

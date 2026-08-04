@@ -76,6 +76,42 @@ interface MineruAssetOptions {
 interface MineruExtractedMarkdown {
   markdown: string
   savedImages: SavedImage[]
+  /** Last page represented by MinerU's structured result, when available. */
+  processedPageCount?: number | null
+}
+
+function collectMineruPageNumbers(value: unknown, pages: Set<number>): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectMineruPageNumbers(item, pages)
+    return
+  }
+  if (!value || typeof value !== "object") return
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if ((key === "page_idx" || key === "page_index") && typeof child === "number" && child >= 0) {
+      pages.add(Math.floor(child) + 1)
+    } else if ((key === "page_no" || key === "page_number") && typeof child === "number") {
+      pages.add(child > 0 ? Math.floor(child) : Math.floor(child) + 1)
+    }
+    if (typeof child === "object" && child !== null) collectMineruPageNumbers(child, pages)
+  }
+}
+
+async function countMineruStructuredPages(zip: JSZip): Promise<number | null> {
+  const candidates: JSZip.JSZipObject[] = []
+  zip.forEach((relativePath, file) => {
+    if (!file.dir && /(?:content_list|middle)[^/]*\.json$/i.test(relativePath)) {
+      candidates.push(file)
+    }
+  })
+  const pages = new Set<number>()
+  for (const file of candidates) {
+    try {
+      collectMineruPageNumbers(JSON.parse(await file.async("string")), pages)
+    } catch {
+      // A non-standard auxiliary JSON file must not discard valid Markdown.
+    }
+  }
+  return pages.size > 0 ? Math.max(...pages) : null
 }
 
 function localMineruApiBase(endpoint: string | undefined): string {
@@ -604,11 +640,28 @@ async function downloadAndExtractMarkdown(
   assetOptions?: MineruAssetOptions,
 ): Promise<MineruExtractedMarkdown> {
   const httpFetch = await getHttpFetch()
-  throwIfAborted(signal)
-  const res = await httpFetch(zipUrl, { signal })
-  if (!res.ok) throw new Error(`MinerU zip download failed: HTTP ${res.status}`)
-
-  const buffer = await res.arrayBuffer()
+  let buffer: ArrayBuffer | null = null
+  let lastDownloadError: Error | null = null
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    throwIfAborted(signal)
+    try {
+      const res = await httpFetch(zipUrl, { signal })
+      if (res.ok) {
+        buffer = await res.arrayBuffer()
+        break
+      }
+      lastDownloadError = new Error(`MinerU zip download failed: HTTP ${res.status}`)
+      if (res.status < 500 || attempt >= 3) throw lastDownloadError
+    } catch (err) {
+      throwIfAborted(signal)
+      lastDownloadError = err instanceof Error ? err : new Error(String(err))
+      if (/HTTP 4\d\d\b/.test(lastDownloadError.message) || attempt >= 3) {
+        throw lastDownloadError
+      }
+    }
+    await waitForPollInterval(signal)
+  }
+  if (!buffer) throw lastDownloadError ?? new Error("MinerU zip download returned no data")
   const zip = await JSZip.loadAsync(buffer)
 
   // Official MinerU result archives contain full.md. Prefer it; fall
@@ -630,7 +683,8 @@ async function downloadAndExtractMarkdown(
   )
   const markdown = await (fullMd ?? mdEntries[0])[1].async("string")
   const markdownWithTables = convertHtmlTablesToMarkdown(markdown)
-  if (!assetOptions) return { markdown: markdownWithTables, savedImages: [] }
+  const processedPageCount = await countMineruStructuredPages(zip)
+  if (!assetOptions) return { markdown: markdownWithTables, savedImages: [], processedPageCount }
 
   try {
     const { pathMap, savedImages } = await saveMineruZipImages(zip, assetOptions, signal)
@@ -639,6 +693,7 @@ async function downloadAndExtractMarkdown(
       ? rewriteMineruMarkdownImages(markdownWithTables, pathMap)
       : markdownWithTables,
       savedImages,
+      processedPageCount,
     }
   } catch (err) {
     if (signal?.aborted) throw err
@@ -646,7 +701,7 @@ async function downloadAndExtractMarkdown(
       "[MinerU] failed to save extracted images; keeping parsed Markdown text:",
       err instanceof Error ? err.message : err,
     )
-    return { markdown: markdownWithTables, savedImages: [] }
+    return { markdown: markdownWithTables, savedImages: [], processedPageCount }
   }
 }
 
@@ -781,7 +836,7 @@ async function parseWithLocalMineru(
         }
       }
       if (pathMap.size > 0) markdown = rewriteMineruMarkdownImages(markdown, pathMap)
-      return { markdown, savedImages }
+      return { markdown, savedImages, processedPageCount: null }
     }
     if (status.status === "failed") {
       throw new Error(`Local MinerU parsing failed: ${status.error || "unknown error"}`)

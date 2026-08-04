@@ -4,12 +4,14 @@ import {
   fileExists,
   getFileModifiedTime,
   getFileSize,
+  getPdfPageCount,
   readFile,
   readFileAsBase64,
   writeFile,
+  writeFileAtomic,
   listDirectory,
 } from "@/commands/fs"
-import { streamChat } from "@/lib/llm-client"
+import { streamChat, type StreamCompletion } from "@/lib/llm-client"
 import type { LlmConfig } from "@/stores/wiki-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { parseWithMineruResult } from "@/lib/mineru"
@@ -34,6 +36,7 @@ import type { FileNode } from "@/types/wiki"
 import {
   extractAndSaveSourceImages,
   extractAndSaveMarkdownImages,
+  renderAndSavePdfPages,
   buildImageMarkdownSection,
   type SavedImage,
 } from "@/lib/extract-source-images"
@@ -48,6 +51,26 @@ import {
   repairIngestReferences,
   validateAndRepairSourceSummaryMetadata,
 } from "@/lib/ingest-integrity"
+import {
+  buildDocumentPipelineSignature,
+  countBuiltinPdfPages,
+  documentIntegrityFailures,
+  type DocumentIngestResult,
+} from "@/lib/document-ingest-result"
+import { upsertSourceKnowledgeLinks } from "@/lib/source-summary-links"
+import {
+  clearGenerationCheckpoint,
+  completedGenerationCheckpointPaths,
+  createGenerationCheckpoint,
+  loadGenerationCheckpoint,
+  renderGenerationCheckpoint,
+  saveGenerationCheckpoint,
+  storeGenerationCheckpointBlocks,
+  storeGenerationCheckpointWrittenFile,
+  type IngestGenerationCheckpoint,
+  type StoredWrittenFile,
+} from "@/lib/ingest-generation-checkpoint"
+import { IngestNeedsAttentionError } from "@/lib/ingest-errors"
 
 const LONG_SOURCE_MIN_BUDGET = 8_000
 const LONG_SOURCE_MAX_SINGLE_PASS_BUDGET = 300_000
@@ -63,7 +86,34 @@ const REVIEW_STAGE_MIN_SIGNAL_CHARS = 10_000
 const REVIEW_STAGE_MIN_FILE_BLOCKS = 4
 const MISSING_PAGE_REPAIR_BATCH_SIZE = 10
 const MISSING_PAGE_REPAIR_ATTEMPTS = 2
+const INITIAL_PAGE_GENERATION_BATCH_SIZE = 6
 const AGGREGATE_WIKI_PATHS = ["wiki/index.md", "wiki/overview.md", "wiki/log.md"] as const
+
+interface IngestModelCallCounts {
+  analysis: number
+  generation: number
+  repair: number
+  review: number
+  merge: number
+}
+
+function emptyIngestModelCallCounts(): IngestModelCallCounts {
+  return { analysis: 0, generation: 0, repair: 0, review: 0, merge: 0 }
+}
+
+function formatIncompleteGenerationDiagnostic(
+  stage: string,
+  completion: StreamCompletion | undefined,
+): string {
+  if (!completion) {
+    return `${stage}: the provider did not expose stream-completion details, so the exact stop reason is unavailable.`
+  }
+  const doneMarker = completion.sawDoneMarker ? "received" : "was not received"
+  const finishReason = completion.finishReason
+    ? `provider finish reason: ${completion.finishReason}`
+    : "provider finish reason: not supplied"
+  return `${stage}: OpenAI-compatible stream ${doneMarker}; ${finishReason}; received ${completion.contentChars} content characters and ${completion.reasoningChars} reasoning characters.`
+}
 
 function appendSavedImageRefsForCaption(content: string, images: SavedImage[]): string {
   if (images.length === 0) return content
@@ -136,13 +186,6 @@ async function extractSourceImagesOnce(
 ): Promise<SavedImage[]> {
   const key = await imageExtractionKey(projectPath, sourcePath, sourceSummarySlug)
   return extractSourceImagesOnceByKey(key, projectPath, sourcePath, sourceSummarySlug)
-}
-
-function isSavedImagePromptUrl(projectPath: string, sourceSummarySlug: string, url: string): boolean {
-  return (
-    url.startsWith(`${projectPath}/wiki/media/${sourceSummarySlug}/`) ||
-    url.startsWith(`media/${sourceSummarySlug}/`)
-  )
 }
 
 function promptImageUrlToAbs(projectPath: string, url: string): string {
@@ -287,7 +330,7 @@ interface LongSourcePlan {
 }
 
 interface LongSourceCheckpoint {
-  version: 1
+  version: 2
   sourceIdentity: string
   sourceHash: string
   sourceLength: number
@@ -410,6 +453,45 @@ export function isSafeIngestPath(p: string): boolean {
   // Must live under wiki/ — the only tree the ingest pipeline writes to.
   if (!normalized.startsWith("wiki/")) return false
   return true
+}
+
+/**
+ * Build the exact URL set that the caption pass is allowed to read.
+ * This uses the extractor result directly instead of guessing from a path
+ * prefix, so PDF page-render fallbacks and nested media folders cannot be
+ * silently filtered out.
+ */
+export function savedImageCaptionUrls(
+  projectPath: string,
+  images: readonly Pick<SavedImage, "relPath" | "absPath">[],
+): Set<string> {
+  const pp = normalizePath(projectPath)
+  const urls = new Set<string>()
+  for (const image of images) {
+    const relPath = normalizePath(image.relPath)
+    const absPath = normalizePath(image.absPath)
+    if (relPath) {
+      urls.add(relPath)
+      urls.add(`${pp}/wiki/${relPath}`)
+    }
+    if (absPath) urls.add(absPath)
+  }
+  return urls
+}
+
+function isTransientIngestServiceError(message: string): boolean {
+  return /\b(?:429|500|502|503|504)\b|service\s+(?:is\s+)?too\s+busy|service[_\s-]*unavailable|temporar(?:y|ily)|timeout|timed\s*out|connection\s+(?:reset|closed)|network\s+error|fetch\s+failed/i.test(message)
+}
+
+async function waitForIngestRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new DOMException("Ingest aborted", "AbortError")
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, delayMs)
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer)
+      reject(new DOMException("Ingest aborted", "AbortError"))
+    }, { once: true })
+  })
 }
 
 /**
@@ -724,41 +806,165 @@ async function autoIngestImpl(
     detail: "Reading source...",
     filesWritten: [],
   })
+  const modelCalls = emptyIngestModelCallCounts()
 
-  // ── MinerU preprocessing for PDF files ──
+  // ── Canonical document preparation ───────────────────────────
+  // Every downstream stage consumes ONE result. MinerU used to write a
+  // cache file and then the pipeline reopened the PDF through pdfium, so the
+  // better Markdown was never actually used for knowledge generation.
   const lowerExt = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() : ""
   const isPdf = lowerExt === "pdf"
   const mineruCfg = useWikiStore.getState().mineruConfig
   let mineruSucceeded = false
   let mineruSavedImages: SavedImage[] = []
+  let mineruProcessedPageCount: number | null = null
+  const preparationWarnings: string[] = []
+  let sourcePageCount: number | null = null
+
+  const [builtinSourceContent, schema, purpose, index, overview] = await Promise.all([
+    tryReadSourceTextFile(sp),
+    tryReadFile(`${pp}/schema.md`),
+    tryReadFile(`${pp}/purpose.md`),
+    tryReadFile(`${pp}/wiki/index.md`),
+    tryReadFile(`${pp}/wiki/overview.md`),
+  ])
+
+  // Check the cache before invoking MinerU or a visual model. Reuse is safe
+  // only when the source, processing configuration, generated pages, and
+  // recorded media artifacts all still match the previous complete ingest.
+  let sourceCacheMaterial = builtinSourceContent
+  if (isPdf) {
+    try {
+      const [size, modified] = await Promise.all([
+        getFileSize(sp),
+        getFileModifiedTime(sp),
+      ])
+      sourceCacheMaterial = `pdf:${size}:${modified}`
+    } catch {
+      sourceCacheMaterial = builtinSourceContent
+    }
+  }
+  const mmCfgForSignature = useWikiStore.getState().multimodalConfig
+  const pipelineSignature = buildDocumentPipelineSignature({
+    mineruEnabled: Boolean(mineruCfg.enabled),
+    mineruBackend: mineruCfg.backend ?? "cloud",
+    mineruModelVersion: mineruCfg.modelVersion ?? "pipeline",
+    imageCaptioningEnabled: Boolean(mmCfgForSignature.enabled),
+    imageCaptionProvider: mmCfgForSignature.provider ?? "",
+    imageCaptionModel: mmCfgForSignature.model ?? "",
+    ingestProvider: llmConfig.provider ?? "",
+    ingestModel: llmConfig.model ?? "",
+  })
+  const cachedFiles = await checkIngestCache(
+    pp,
+    sourceIdentity,
+    sourceCacheMaterial,
+    pipelineSignature,
+  )
+  console.log(
+    `[ingest:diag] cache check for "${sourceIdentity}":`,
+    cachedFiles === null ? "MISS (full pipeline)" : `HIT (${cachedFiles.length} cached files)`,
+  )
+  if (cachedFiles !== null) {
+    activity.updateItem(activityId, {
+      status: "done",
+      detail: `Skipped (unchanged) — ${cachedFiles.length} files from previous ingest`,
+      filesWritten: cachedFiles,
+    })
+    return cachedFiles
+  }
+
+  if (isPdf) {
+    try {
+      sourcePageCount = await getPdfPageCount(sp)
+    } catch (err) {
+      preparationWarnings.push(
+        `Could not read the authoritative PDF page count: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  let canonicalSourceContent = builtinSourceContent
   const mineruConfigured = mineruCfg.backend === "local" || Boolean(mineruCfg.token)
   if (isPdf && mineruCfg.enabled && mineruConfigured) {
     try {
       const cacheDir = sp.substring(0, sp.lastIndexOf("/"))
       const cachePath = `${cacheDir}/.cache/${fileName}.txt`
-      activity.updateItem(activityId, { detail: "MinerU: parsing PDF..." })
-      console.log(`[ingest:mineru] submitting "${fileName}" to MinerU API`)
-      const mineruResult = await parseWithMineruResult(mineruCfg, sp, undefined, (msg) => {
-        activity.updateItem(activityId, { detail: `MinerU: ${msg}` })
-      }, signal, {
-        projectPath: pp,
-        sourceSummarySlug,
+      const cacheMetaPath = `${cachePath}.meta.json`
+      const extractionSignature = JSON.stringify({
+        version: 2,
+        source: sourceCacheMaterial,
+        backend: mineruCfg.backend ?? "cloud",
+        model: mineruCfg.modelVersion ?? "pipeline",
       })
-      await createDirectory(`${cacheDir}/.cache`)
-      await writeFile(cachePath, mineruResult.markdown)
-      mineruSavedImages = mineruResult.savedImages
+      const [cachedMarkdown, cachedMetaRaw] = await Promise.all([
+        tryReadFile(cachePath),
+        tryReadFile(cacheMetaPath),
+      ])
+      if (cachedMarkdown.trim() && cachedMetaRaw.trim()) {
+        try {
+          const cachedMeta = JSON.parse(cachedMetaRaw) as {
+            extractionSignature?: unknown
+            processedPageCount?: unknown
+            imagePaths?: unknown
+          }
+          if (cachedMeta.extractionSignature === extractionSignature) {
+            const expectedImagePaths = Array.isArray(cachedMeta.imagePaths)
+              ? cachedMeta.imagePaths.filter((path): path is string => typeof path === "string")
+              : []
+            const cachedImages = await savedImagesFromMineruMarkdown(
+              pp,
+              sourceSummarySlug,
+              cachedMarkdown,
+            )
+            if (cachedImages.length === expectedImagePaths.length) {
+              canonicalSourceContent = cachedMarkdown
+              mineruSavedImages = cachedImages
+              mineruProcessedPageCount = typeof cachedMeta.processedPageCount === "number"
+                ? cachedMeta.processedPageCount
+                : null
+              mineruSucceeded = true
+              activity.updateItem(activityId, { detail: "MinerU: reused verified extraction cache" })
+              console.log(`[ingest:mineru] reused extraction cache for "${fileName}"`)
+            }
+          }
+        } catch {
+          // Invalid stage metadata is a cache miss; the source is reparsed.
+        }
+      }
+      if (!mineruSucceeded) {
+        activity.updateItem(activityId, { detail: "MinerU: parsing PDF..." })
+        console.log(`[ingest:mineru] submitting "${fileName}" to MinerU API`)
+        const mineruResult = await parseWithMineruResult(mineruCfg, sp, undefined, (msg) => {
+          activity.updateItem(activityId, { detail: `MinerU: ${msg}` })
+        }, signal, {
+          projectPath: pp,
+          sourceSummarySlug,
+        })
+        await createDirectory(`${cacheDir}/.cache`)
+        await writeFile(cachePath, mineruResult.markdown)
+        await writeFile(cacheMetaPath, JSON.stringify({
+          extractionSignature,
+          processedPageCount: mineruResult.processedPageCount ?? null,
+          imagePaths: mineruResult.savedImages.map((image) => image.relPath),
+        }, null, 2))
+        canonicalSourceContent = mineruResult.markdown
+        mineruSavedImages = mineruResult.savedImages
+        mineruProcessedPageCount = mineruResult.processedPageCount ?? null
+        mineruSucceeded = true
+      }
       if (mineruSavedImages.length > 0) {
         const extractionKey = await imageExtractionKey(pp, sp, sourceSummarySlug)
         rememberImageExtractionByKey(extractionKey, Promise.resolve(mineruSavedImages))
       }
-      mineruSucceeded = true
       console.log(
-        `[ingest:mineru] cached MinerU output for "${fileName}" (${mineruResult.markdown.length} chars, images=${mineruSavedImages.length})`,
+        `[ingest:mineru] ready MinerU output for "${fileName}" (${canonicalSourceContent.length} chars, images=${mineruSavedImages.length})`,
       )
     } catch (err) {
       throwIfIngestAborted(signal, activityId)
       const msg = trimInlineStatus(err instanceof Error ? err.message : String(err))
       console.warn(`[ingest:mineru] MinerU parsing failed, falling back to pdfium: ${msg}`)
+      preparationWarnings.push(`MinerU failed; built-in PDF extraction was used instead: ${msg}`)
       activity.updateItem(activityId, {
         detail: `MinerU failed, falling back to built-in PDF extraction: ${msg}`,
       })
@@ -766,15 +972,11 @@ async function autoIngestImpl(
     if (mineruSucceeded && !signal?.aborted) {
       activity.updateItem(activityId, { detail: "Reading source..." })
     }
+  } else if (isPdf && mineruCfg.enabled && !mineruConfigured) {
+    preparationWarnings.push("MinerU is enabled but not configured; built-in PDF extraction was used instead.")
   }
 
-  const [sourceContent, schema, purpose, index, overview] = await Promise.all([
-    tryReadSourceTextFile(sp),
-    tryReadFile(`${pp}/schema.md`),
-    tryReadFile(`${pp}/purpose.md`),
-    tryReadFile(`${pp}/wiki/index.md`),
-    tryReadFile(`${pp}/wiki/overview.md`),
-  ])
+  const sourceContent = canonicalSourceContent
   if (isPdf && mineruSavedImages.length === 0 && hasMineruImageRefs(sourceContent, sourceSummarySlug)) {
     mineruSavedImages = await savedImagesFromMineruMarkdown(pp, sourceSummarySlug, sourceContent)
     if (mineruSavedImages.length > 0) {
@@ -783,97 +985,76 @@ async function autoIngestImpl(
     }
   }
 
-  // ── Cache check: skip re-ingest if source content hasn't changed ──
-  //
-  // Image cascade still runs on cache hits. Reason: a user may have
-  // ingested this source on a previous app version that didn't extract
-  // images yet, or the media dir may have been deleted out from under
-  // us. `extractAndSaveSourceImages` + injection are both idempotent
-  // (deterministic output paths, marker-bracketed replacement), so
-  // re-running them costs only the extraction time and converges the
-  // source-summary page on the current pipeline's contract regardless
-  // of when the file was first ingested.
-  const cachedFiles = await checkIngestCache(pp, sourceIdentity, sourceContent)
-  console.log(`[ingest:diag] cache check for "${sourceIdentity}":`, cachedFiles === null ? "MISS (full pipeline)" : `HIT (${cachedFiles.length} cached files)`)
-  if (cachedFiles !== null) {
+  const documentResult: DocumentIngestResult = {
+    content: sourceContent,
+    extractionMode: isPdf ? (mineruSucceeded ? "mineru" : "builtin") : "text",
+    sourcePageCount,
+    processedPageCount: isPdf
+      ? (mineruSucceeded ? mineruProcessedPageCount : countBuiltinPdfPages(sourceContent))
+      : null,
+    savedImages: mineruSavedImages,
+    degraded: isPdf && mineruCfg.enabled && !mineruSucceeded,
+    warnings: preparationWarnings,
+  }
+  if (isPdf && mineruSucceeded && mineruProcessedPageCount === null) {
+    preparationWarnings.push(
+      "MinerU returned usable Markdown but no structured page index, so exact page-count coverage could not be independently confirmed.",
+    )
+  }
+  const preprocessingFailures = documentIntegrityFailures(documentResult)
+  let captionFailureDetails: Array<{ url: string; message: string }> = []
+  const stopBeforeKnowledgeWrite = async (details: {
+    extractedImages?: number
+    captionAttempted?: number
+    captionFresh?: number
+    captionCached?: number
+    captionFailed?: number
+    expectedKnowledgePages?: number
+    missingKnowledgePages?: string[]
+  } = {}): Promise<never> => {
+    const failureDetail = preprocessingFailures.join(" ") || "Document preprocessing is incomplete."
+    const warningLines = [...preparationWarnings, ...preprocessingFailures]
+    await appendIngestWarningLog(pp, sourceIdentity, warningLines)
     try {
-      console.log(`[ingest:diag] cache-hit branch: starting image extraction for ${sp}`)
-      const skipNativePdfImageExtraction = isPdf && hasMineruImageRefs(sourceContent, sourceSummarySlug)
-      let savedImages = skipNativePdfImageExtraction
-        ? mineruSavedImages
-        : await extractAndSaveSourceImages(pp, sp, sourceSummarySlug)
-      const markdownImages = await extractAndSaveMarkdownImages(pp, sp, sourceContent, sourceSummarySlug)
-      savedImages = [...savedImages, ...markdownImages]
-      console.log(`[ingest:diag] cache-hit branch: got ${savedImages.length} image(s)`)
-      if (savedImages.length > 0) {
-        // Caption first (populates the cache), THEN inject — the
-        // safety-net section uses the cache to populate alt text.
-        // Doing them in this order means cache-hit re-runs (e.g.
-        // user re-imports an old PDF after captioning was added)
-        // converge: first run grows the cache, second run uses it.
-        //
-        // Master-toggle gate: when multimodal is OFF the entire
-        // image-cascade is skipped here. This matches the
-        // full-pipeline branch's strip-and-skip behavior for the
-        // cache-hit path, so a user re-importing an old file
-        // after disabling captioning sees images disappear from
-        // the wiki side. (If a previous ingest had already written
-        // a `## Embedded Images` block, it stays — re-import
-        // doesn't proactively scrub old wiki content. The user
-        // would need to delete the wiki/sources/<slug>.md page
-        // to start clean.)
-        const mmCfg = useWikiStore.getState().multimodalConfig
-        if (!mmCfg.enabled) {
-          console.log(
-            `[ingest:caption] cache-hit + disabled — skipping caption + safety-net inject (${savedImages.length} image(s) untouched on disk)`,
-          )
-        } else {
-          const captionLlm = resolveCaptionConfig(mmCfg, llmConfig)
-          if (captionLlm) {
-            try {
-              await captionMarkdownImages(pp, appendSavedImageRefsForCaption(sourceContent, savedImages), captionLlm, {
-                signal,
-                shouldCaption: (url) =>
-                  isSavedImagePromptUrl(pp, sourceSummarySlug, url),
-                urlToAbsPath: (url) => promptImageUrlToAbs(pp, url),
-                concurrency: mmCfg.concurrency,
-                onProgress: (done, total) =>
-                  activity.updateItem(activityId, {
-                    detail: `Captioning images... ${done}/${total}`,
-                  }),
-              })
-            } catch (err) {
-              console.warn(
-                `[ingest:caption] cache-hit caption pass failed:`,
-                err instanceof Error ? err.message : err,
-              )
-            }
-          }
-          await injectImagesIntoSourceSummary(pp, sourceIdentity, sourceSummarySlug, savedImages)
-          // Re-embed the source-summary page so caption text lands
-          // in the search index. Without this step, search by image
-          // content stays empty for files ingested before captioning
-          // was added — the safety-net section was just rewritten
-          // with captions, but the embeddings still reflect the old
-          // empty-alt content.
-          await reembedSourceSummary(pp, sourceIdentity, sourceSummarySlug)
-        }
-      } else {
-        console.log(`[ingest:diag] cache-hit branch: skipping injection (no images returned from extraction)`)
-      }
-    } catch (err) {
+      await writeIngestDiagnosticReport(pp, sourceSummarySlug, {
+        source: sourceIdentity,
+        extractionMode: documentResult.extractionMode,
+        degraded: documentResult.degraded,
+        sourcePages: documentResult.sourcePageCount,
+        processedPages: documentResult.processedPageCount,
+        extractedImages: details.extractedImages ?? documentResult.savedImages.length,
+        captionAttempted: details.captionAttempted ?? 0,
+        captionFresh: details.captionFresh ?? 0,
+        captionCached: details.captionCached ?? 0,
+        captionFailed: details.captionFailed ?? 0,
+        captionFailures: captionFailureDetails,
+        resumedKnowledgePages: 0,
+        resumedWrittenPages: 0,
+        modelCalls,
+        expectedKnowledgePages: details.expectedKnowledgePages ?? 0,
+        missingKnowledgePages: details.missingKnowledgePages ?? [],
+        warnings: preparationWarnings,
+        failures: preprocessingFailures,
+        complete: false,
+      })
+    } catch (diagnosticError) {
       console.warn(
-        `[ingest:images] cache-hit injection failed for "${fileName}":`,
-        err instanceof Error ? err.message : err,
+        `[ingest:diag] failed to save early diagnostic for "${sourceIdentity}":`,
+        diagnosticError instanceof Error ? diagnosticError.message : diagnosticError,
       )
     }
-    activity.updateItem(activityId, {
-      status: "done",
-      detail: `Skipped (unchanged) — ${cachedFiles.length} files from previous ingest`,
-      filesWritten: cachedFiles,
-    })
-    return cachedFiles
+    activity.updateItem(activityId, { status: "error", detail: failureDetail })
+    throw new Error(failureDetail)
   }
+
+  // Do not spend model tokens or write partial Wiki pages when extraction is
+  // already known to be incomplete.
+  if (preprocessingFailures.length > 0) {
+    await stopBeforeKnowledgeWrite()
+  }
+
+  // ── Cache check: skip re-ingest if source content hasn't changed ──
+  //
 
   // ── Step 0.5: Extract embedded images ─────────────────────────
   // Pulls every embedded image out of PDF / PPTX / DOCX into
@@ -894,14 +1075,29 @@ async function autoIngestImpl(
   // and returns [] on any error.
   activity.updateItem(activityId, { detail: "Extracting embedded images..." })
   console.log(`[ingest:diag] full-pipeline branch: starting image extraction for ${sp}`)
-  const skipNativePdfImageExtraction = isPdf && (
-    hasMineruImageRefs(sourceContent, sourceSummarySlug)
-  )
-  let savedImages = skipNativePdfImageExtraction
+  let savedImages = mineruSucceeded
     ? mineruSavedImages
     : await extractAndSaveSourceImages(pp, sp, sourceSummarySlug)
-  const markdownImages = await extractAndSaveMarkdownImages(pp, sp, sourceContent, sourceSummarySlug)
+  const markdownImages = mineruSucceeded
+    ? []
+    : await extractAndSaveMarkdownImages(pp, sp, sourceContent, sourceSummarySlug)
   savedImages = [...savedImages, ...markdownImages]
+  const visualConfigForFallback = useWikiStore.getState().multimodalConfig
+  if (isPdf && !mineruSucceeded && visualConfigForFallback.enabled && savedImages.length === 0) {
+    activity.updateItem(activityId, {
+      detail: "No extractable images found; rendering PDF pages for visual coverage...",
+    })
+    try {
+      savedImages = await renderAndSavePdfPages(pp, sp, sourceSummarySlug)
+      preparationWarnings.push(
+        `MinerU was unavailable and the PDF exposed no independent images; ${savedImages.length} page rendering(s) were used for visual coverage.`,
+      )
+    } catch (err) {
+      preprocessingFailures.push(
+        `PDF visual fallback failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
   console.log(`[ingest:diag] full-pipeline branch: got ${savedImages.length} image(s)`)
   if (savedImages.length > 0) {
     console.log(
@@ -954,6 +1150,11 @@ async function autoIngestImpl(
   )
   const mmCfg = useWikiStore.getState().multimodalConfig
   const captionLlm = resolveCaptionConfig(mmCfg, llmConfig)
+  const captionUrls = savedImageCaptionUrls(pp, savedImages)
+  let captionAttempted = 0
+  let captionFresh = 0
+  let captionCached = 0
+  let captionFailed = 0
   if (!mmCfg.enabled && savedImages.length > 0) {
     // Strip `![alt](url)` references — match the same regex shape
     // we use elsewhere for image refs. Preserve a single space
@@ -971,7 +1172,6 @@ async function autoIngestImpl(
     /!\[\]\(/.test(enrichedSourceContent)
   ) {
     activity.updateItem(activityId, { detail: "Captioning images..." })
-    const ourMediaPrefix = `${pp}/wiki/media/${sourceSummarySlug}/`
     try {
       const result = await captionMarkdownImages(pp, enrichedSourceContent, captionLlm, {
         signal,
@@ -980,7 +1180,11 @@ async function autoIngestImpl(
         // pre-existing markdown image refs the user may have typed
         // into the source content (e.g. for hand-authored .md
         // sources).
-        shouldCaption: (url) => url.startsWith(ourMediaPrefix) || isSavedImagePromptUrl(pp, sourceSummarySlug, url),
+        shouldCaption: (url) => {
+          const normalizedUrl = normalizePath(url)
+          const normalizedAbs = normalizePath(promptImageUrlToAbs(pp, normalizedUrl))
+          return captionUrls.has(normalizedUrl) || captionUrls.has(normalizedAbs)
+        },
         urlToAbsPath: (url) => promptImageUrlToAbs(pp, url),
         concurrency: mmCfg.concurrency,
         onProgress: (done, total) =>
@@ -989,26 +1193,72 @@ async function autoIngestImpl(
           }),
       })
       enrichedSourceContent = stripWikiMediaAbsPaths(pp, result.enrichedMarkdown)
+      captionFresh = result.freshCaptions
+      captionCached = result.cachedCaptions
+      captionAttempted = result.freshCaptions + result.cachedCaptions + result.failed
+      captionFailed = result.failed
+      if (result.failed > 0) {
+        captionFailureDetails = result.failures
+        const failedImages = result.failures
+          .map((failure) => `${failure.url}: ${failure.message}`)
+          .join(" | ")
+        preprocessingFailures.push(
+          `Image captioning is incomplete: ${result.failed}/${savedImages.length} image(s) failed after retry.${failedImages ? ` ${failedImages}` : ""}`,
+        )
+      }
+      if (captionAttempted < savedImages.length) {
+        preprocessingFailures.push(
+          `Image captioning skipped ${savedImages.length - captionAttempted}/${savedImages.length} extracted image(s).`,
+        )
+      }
       console.log(
         `[ingest:caption] images=${savedImages.length} fresh=${result.freshCaptions} cached=${result.cachedCaptions} failed=${result.failed}`,
       )
     } catch (err) {
+      captionAttempted = savedImages.length
+      captionFailed = savedImages.length
+      preprocessingFailures.push(
+        `Image captioning failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
       console.warn(
         `[ingest:caption] pipeline failed for "${fileName}":`,
         err instanceof Error ? err.message : err,
       )
-      // Fall through with original (empty-alt) source content —
-      // captioning failure must NEVER break ingest.
     }
+  } else if (mmCfg.enabled && savedImages.length > 0 && !captionLlm) {
+    captionAttempted = savedImages.length
+    captionFailed = savedImages.length
+    preprocessingFailures.push(
+      `Image captioning is enabled, but no usable vision model is configured for ${savedImages.length} extracted image(s).`,
+    )
+  }
+
+  if (preprocessingFailures.length > 0) {
+    await stopBeforeKnowledgeWrite({
+      extractedImages: savedImages.length,
+      captionAttempted,
+      captionFresh,
+      captionCached,
+      captionFailed,
+    })
   }
 
   const stableContextLength = schema.length + purpose.length + index.length + overview.length
   const sourceBudget = computeIngestSourceBudget(llmConfig.maxContextSize, stableContextLength)
-  let sourceContext = enrichedSourceContent
-  let precomputedAnalysis = ""
+  const generationCheckpointKey = hashTextHex([
+    "generation-checkpoint-v2",
+    pipelineSignature,
+    enrichedSourceContent,
+  ].join("\n"))
+  let generationCheckpoint = await loadGenerationCheckpoint(pp, sourceSummarySlug, {
+    checkpointKey: generationCheckpointKey,
+    sourceIdentity,
+  })
+  let sourceContext = generationCheckpoint?.sourceContext ?? enrichedSourceContent
+  let precomputedAnalysis = generationCheckpoint?.analysis ?? ""
   let longSourceCheckpointPath: string | undefined
 
-  if (enrichedSourceContent.length > sourceBudget) {
+  if (!generationCheckpoint && enrichedSourceContent.length > sourceBudget) {
     const longSourcePlan = await analyzeLongSourceInChunks(
       pp,
       llmConfig,
@@ -1022,6 +1272,7 @@ async function autoIngestImpl(
       sourceBudget,
       activityId,
       signal,
+      () => { modelCalls.analysis++ },
     )
     if (longSourcePlan.chunked) {
       sourceContext = longSourcePlan.sourceContext
@@ -1034,14 +1285,17 @@ async function autoIngestImpl(
   // LLM reads the source and produces a structured analysis:
   // key entities, concepts, main arguments, connections to existing wiki, contradictions
   activity.updateItem(activityId, {
-    detail: precomputedAnalysis
-      ? "Step 1/2: Consolidating long-source analysis..."
+    detail: generationCheckpoint
+      ? "Step 1/2: Reusing saved source analysis..."
+      : precomputedAnalysis
+        ? "Step 1/2: Consolidating long-source analysis..."
       : "Step 1/2: Analyzing source...",
   })
 
   let analysis = precomputedAnalysis
 
   if (!analysis) {
+    modelCalls.analysis++
     await streamChat(
       llmConfig,
       [
@@ -1068,67 +1322,317 @@ async function autoIngestImpl(
     throw new Error(analysisActivity.detail || "Analysis stream failed")
   }
 
-  // ── Step 2: Generation ────────────────────────────────────────
-  // LLM takes the analysis as context and produces wiki files + review items
+  // ── Step 2: Bounded generation ────────────────────────────────
+  // Stage 1 is the contract. Generate that contract in small batches so a
+  // provider limit cannot discard the tail of a 50-page response.
   activity.updateItem(activityId, { detail: "Step 2/2: Generating wiki pages..." })
 
-  let generation = ""
+  const isLongSourceAnalysis = Boolean(longSourceCheckpointPath) || sourceContext.startsWith("# Long Source Context:")
+  let expectedKnowledgePaths = isCuratedPassthroughSource(enrichedSourceContent)
+    ? []
+    : extractExpectedKnowledgePaths(analysis, { fallbackToOutline: isLongSourceAnalysis })
 
-  await streamChat(
-    llmConfig,
-    [
-      { role: "system", content: buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath) },
-      {
-        role: "user",
-        content: [
-          `Source document to process: **${sourceIdentity}**`,
-          "",
-          "The Stage 1 analysis below is CONTEXT to inform your output. Do NOT echo",
-          "its tables, bullet points, or prose. Your output must be FILE/REVIEW",
-          "blocks as specified in the system prompt — nothing else.",
-          "",
-          "## Stage 1 Analysis (context only — do not repeat)",
-          "",
-          analysis,
-          "",
-          "## Source Context",
-          "",
-          sourceContext,
-          "",
-          "---",
-          "",
-          `Now emit the FILE blocks for the wiki files derived from **${sourceIdentity}**.`,
-          "Your response MUST begin with `---FILE:` as the very first characters.",
-          "No preamble. No analysis prose. Start immediately.",
-        ].join("\n"),
-      },
-    ],
-    {
-      onToken: (token) => { generation += token },
-      onDone: () => {},
-      onError: (err) => {
-        activity.updateItem(activityId, { status: "error", detail: `Generation failed: ${err.message}` })
-      },
-    },
-    signal,
-    {
-      temperature: 0.1,
-      reasoning: { mode: "off" },
-      max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize),
-    },
+  if (
+    isLongSourceAnalysis &&
+    expectedKnowledgePaths.length === 0 &&
+    !hasNoStandalonePagesDeclaration(analysis)
+  ) {
+    activity.updateItem(activityId, { detail: "Finalizing the long-document knowledge plan..." })
+    try {
+      const finalizedPlan = await finalizeLongSourceKnowledgePlan(
+        llmConfig,
+        analysis,
+        schema,
+        sourceIdentity,
+        signal,
+        () => { modelCalls.analysis++ },
+      )
+      analysis = `${analysis.trimEnd()}\n\n${finalizedPlan.trim()}\n`
+      expectedKnowledgePaths = extractExpectedKnowledgePaths(analysis, { fallbackToOutline: true })
+    } catch (err) {
+      preprocessingFailures.push(
+        `Long-document knowledge plan could not be finalized: ${err instanceof Error ? err.message : String(err)}`,
+      )
+      await stopBeforeKnowledgeWrite()
+    }
+  }
+
+  if (
+    isLongSourceAnalysis &&
+    expectedKnowledgePaths.length === 0 &&
+    !hasNoStandalonePagesDeclaration(analysis)
+  ) {
+    preprocessingFailures.push(
+      "Long-document analysis produced neither standalone knowledge pages nor an explicit explanation that none are needed.",
+    )
+    await stopBeforeKnowledgeWrite()
+  }
+  const requestedGenerationPaths = uniqueNormalizedPaths([
+    sourceSummaryPath,
+    ...expectedKnowledgePaths,
+  ])
+  if (
+    !generationCheckpoint
+    || generationCheckpoint.requestedPaths.length !== requestedGenerationPaths.length
+    || generationCheckpoint.requestedPaths.some(
+      (path, index) => normalizePath(path) !== normalizePath(requestedGenerationPaths[index] ?? ""),
+    )
+  ) {
+    generationCheckpoint = createGenerationCheckpoint({
+      checkpointKey: generationCheckpointKey,
+      sourceIdentity,
+      analysis,
+      sourceContext,
+      requestedPaths: requestedGenerationPaths,
+    })
+    await saveGenerationCheckpoint(pp, sourceSummarySlug, generationCheckpoint)
+  }
+
+  const checkpoint = generationCheckpoint as IngestGenerationCheckpoint
+  const checkpointCompleted = completedGenerationCheckpointPaths(checkpoint)
+  const resumedKnowledgePages = checkpointCompleted.size
+  const pendingGenerationPaths = requestedGenerationPaths.filter(
+    (path) => !checkpointCompleted.has(normalizePath(path).toLowerCase()),
   )
+  const generationBatches = chunkArray(pendingGenerationPaths, INITIAL_PAGE_GENERATION_BATCH_SIZE)
+  const generationBatchFailures: string[] = []
+  let generationCompletion: StreamCompletion | undefined
 
-  const generationActivity = useActivityStore.getState().items.find((i) => i.id === activityId)
-  if (generationActivity?.status === "error") {
-    throw new Error(generationActivity.detail || "Generation stream failed")
+  const persistCompleteGenerationBlocks = async (output: string): Promise<string[]> => {
+    if (!output.trim()) return []
+    const parsed = parseFileBlocks(output)
+    const canonicalBlocks = parsed.blocks.map((block) => ({
+      path: normalizePath(block.path).toLowerCase().startsWith("wiki/sources/")
+        ? sourceSummaryPath
+        : block.path,
+      content: block.content,
+    }))
+    const stored = storeGenerationCheckpointBlocks(checkpoint, canonicalBlocks)
+    const emittedReviewBlocks = output.match(/---REVIEW:\s*[\s\S]*?---END REVIEW---/gi) ?? []
+    if (emittedReviewBlocks.length > 0) {
+      const existingReviews = checkpoint.reviewSuggestionOutput?.trim() ?? ""
+      checkpoint.reviewSuggestionOutput = [existingReviews, ...emittedReviewBlocks]
+        .filter(Boolean)
+        .join("\n\n")
+      checkpoint.reviewCompleted = true
+    }
+    if (stored.length > 0 || emittedReviewBlocks.length > 0) {
+      await saveGenerationCheckpoint(pp, sourceSummarySlug, checkpoint)
+    }
+    return stored
+  }
+
+  for (let batchIndex = 0; batchIndex < generationBatches.length; batchIndex++) {
+    throwIfIngestAborted(signal, activityId)
+    const batch = generationBatches[batchIndex]
+    activity.updateItem(activityId, {
+      detail: `Step 2/2: Generating wiki batch ${batchIndex + 1}/${generationBatches.length} (${batch.length} page(s))...`,
+    })
+    let remainingBatch = [...batch]
+    let batchError: string | null = null
+    for (let attempt = 1; attempt <= 2 && remainingBatch.length > 0; attempt++) {
+      let batchOutput = ""
+      batchError = null
+      try {
+        modelCalls.generation++
+        await streamChat(
+        llmConfig,
+        [
+          {
+            role: "system",
+            content: buildInitialPageBatchPrompt(
+              remainingBatch,
+              sourceSummaryPath,
+              sourceIdentity,
+              {
+                schema,
+                purpose,
+                analysis,
+                sourceContext,
+                maxContextSize: llmConfig.maxContextSize,
+              },
+            ),
+          },
+          {
+            role: "user",
+            content: `${sourceContext.startsWith("# Long Source Context") ? "Long Source Context is supplied in the system prompt.\n" : ""}Generate every requested FILE block now. Start immediately with \`---FILE:\`.`,
+          },
+        ],
+        {
+          onToken: (token) => { batchOutput += token },
+          onDone: (completion) => { generationCompletion = completion },
+          onError: (err) => { batchError = err.message },
+        },
+          signal,
+          {
+            temperature: 0.1,
+            reasoning: { mode: "off" },
+            max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize),
+          },
+        )
+      } catch (err) {
+        throwIfIngestAborted(signal, activityId)
+        batchError = err instanceof Error ? err.message : String(err)
+      }
+      await persistCompleteGenerationBlocks(batchOutput)
+      const completedAfterAttempt = completedGenerationCheckpointPaths(checkpoint)
+      remainingBatch = remainingBatch.filter(
+        (path) => !completedAfterAttempt.has(normalizePath(path).toLowerCase()),
+      )
+      if (remainingBatch.length === 0) break
+      if (attempt < 2 && batchError) {
+        activity.updateItem(activityId, {
+          detail: `Retrying ${remainingBatch.length} unfinished page(s) from wiki batch ${batchIndex + 1}/${generationBatches.length}...`,
+        })
+      }
+    }
+    if (remainingBatch.length > 0 && batchError) {
+      generationBatchFailures.push(
+        `Generation batch ${batchIndex + 1}/${generationBatches.length} failed for ${remainingBatch.join(", ")}: ${batchError}`,
+      )
+    }
   }
   throwIfIngestAborted(signal, activityId)
 
-  let reviewSuggestionOutput = ""
-  if (!signal?.aborted && shouldRunDedicatedReviewStage(generation)) {
-    let reviewStageHadError = false
+  // Validate every requested block before writing anything. Every complete
+  // block has already been saved to the checkpoint, so a retry resumes from
+  // only the unfinished paths instead of spending tokens on completed work.
+  for (let attempt = 1; attempt <= MISSING_PAGE_REPAIR_ATTEMPTS; attempt++) {
+    const completed = completedGenerationCheckpointPaths(checkpoint)
+    const missingBeforeWrite = requestedGenerationPaths.filter(
+      (path) => !completed.has(normalizePath(path).toLowerCase()),
+    )
+    if (missingBeforeWrite.length === 0) break
+    activity.updateItem(activityId, {
+      detail: `Completing ${missingBeforeWrite.length} missing file(s) before writing (attempt ${attempt}/${MISSING_PAGE_REPAIR_ATTEMPTS})...`,
+    })
+    for (const batch of chunkArray(missingBeforeWrite, INITIAL_PAGE_GENERATION_BATCH_SIZE)) {
+      let repair = ""
+      let repairError: string | null = null
+      try {
+        modelCalls.repair++
+        await streamChat(
+          llmConfig,
+          [
+            {
+              role: "system",
+              content: buildMissingPageRepairPrompt(
+                batch,
+                sourceIdentity,
+                { schema, purpose, analysis, sourceContext, maxContextSize: llmConfig.maxContextSize },
+              ),
+            },
+            { role: "user", content: "Regenerate every requested FILE block completely." },
+          ],
+          {
+            onToken: (token) => { repair += token },
+            onDone: (completion) => { generationCompletion = completion },
+            onError: (err) => { repairError = err.message },
+          },
+          signal,
+          {
+            temperature: 0.1,
+            reasoning: { mode: "off" },
+            max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize),
+          },
+        )
+      } catch (err) {
+        throwIfIngestAborted(signal, activityId)
+        repairError = err instanceof Error ? err.message : String(err)
+      }
+      await persistCompleteGenerationBlocks(repair)
+      if (repairError) {
+        generationBatchFailures.push(
+          `Missing-page repair attempt ${attempt} failed for ${batch.join(", ")}: ${repairError}`,
+        )
+      }
+    }
+  }
+
+  const generation = renderGenerationCheckpoint(checkpoint)
+  const prewriteParsed = parseFileBlocks(generation)
+  const prewriteCompleted = completedGenerationPaths(prewriteParsed.blocks, sourceSummaryPath)
+  const prewriteMissing = requestedGenerationPaths.filter(
+    (path) => !prewriteCompleted.has(normalizePath(path).toLowerCase()),
+  )
+  if (prewriteMissing.length > 0) {
+    const detail = [
+      ...generationBatchFailures,
+      prewriteMissing.length > 0
+        ? `Incomplete ingest: ${prewriteMissing.length} expected page(s) missing before write: ${prewriteMissing.join(", ")}`
+        : "",
+    ].filter(Boolean).join(" ")
+    await appendIngestWarningLog(pp, sourceIdentity, [detail])
     try {
-      await streamChat(
+      await writeIngestDiagnosticReport(pp, sourceSummarySlug, {
+        source: sourceIdentity,
+        extractionMode: documentResult.extractionMode,
+        degraded: documentResult.degraded,
+        sourcePages: documentResult.sourcePageCount,
+        processedPages: documentResult.processedPageCount,
+        extractedImages: savedImages.length,
+        captionAttempted,
+        captionFresh,
+        captionCached,
+        captionFailed,
+        captionFailures: captionFailureDetails,
+        resumedKnowledgePages,
+        resumedWrittenPages: 0,
+        modelCalls,
+        expectedKnowledgePages: expectedKnowledgePaths.length,
+        missingKnowledgePages: prewriteMissing,
+        warnings: preparationWarnings,
+        failures: [detail],
+        complete: false,
+      })
+    } catch (diagnosticError) {
+      console.warn(
+        `[ingest:diag] failed to save pre-write diagnostic for "${sourceIdentity}":`,
+        diagnosticError instanceof Error ? diagnosticError.message : diagnosticError,
+      )
+    }
+    activity.updateItem(activityId, { status: "error", detail })
+    throw new IngestNeedsAttentionError(detail)
+  }
+
+  const verifiedWrittenFiles: StoredWrittenFile[] = []
+  let removedStaleWrittenCheckpoint = false
+  for (const [key, writtenFile] of Object.entries(checkpoint.writtenFiles ?? {})) {
+    try {
+      const diskContent = await readFile(`${pp}/${writtenFile.finalPath}`)
+      if (hashTextHex(diskContent) === writtenFile.contentHash) {
+        verifiedWrittenFiles.push(writtenFile)
+      } else {
+        delete checkpoint.writtenFiles?.[key]
+        removedStaleWrittenCheckpoint = true
+      }
+    } catch {
+      delete checkpoint.writtenFiles?.[key]
+      removedStaleWrittenCheckpoint = true
+    }
+  }
+  if (removedStaleWrittenCheckpoint) {
+    await saveGenerationCheckpoint(pp, sourceSummarySlug, checkpoint)
+  }
+  const resumedWrittenPages = verifiedWrittenFiles.length
+  const persistCommittedFile = async (
+    inputPath: string,
+    finalPath: string,
+    contentHash: string,
+  ): Promise<void> => {
+    storeGenerationCheckpointWrittenFile(checkpoint, { inputPath, finalPath, contentHash })
+    await saveGenerationCheckpoint(pp, sourceSummarySlug, checkpoint)
+  }
+
+  let reviewSuggestionOutput = checkpoint.reviewCompleted
+    ? checkpoint.reviewSuggestionOutput ?? ""
+    : ""
+  if (!signal?.aborted && shouldRunDedicatedReviewStage(generation)) {
+    if (!checkpoint.reviewCompleted) {
+      let reviewStageHadError = false
+      try {
+        modelCalls.review++
+        await streamChat(
         llmConfig,
         [
           {
@@ -1162,13 +1666,21 @@ async function autoIngestImpl(
           reasoning: { mode: "off" },
           max_tokens: computeIngestReviewMaxTokens(llmConfig.maxContextSize),
         },
-      )
-    } catch (err) {
+        )
+      } catch (err) {
+        throwIfIngestAborted(signal, activityId)
+        reviewStageHadError = true
+        console.warn(`[ingest] Review suggestion generation failed for "${sourceIdentity}":`, err)
+      }
       throwIfIngestAborted(signal, activityId)
-      console.warn(`[ingest] Review suggestion generation failed for "${sourceIdentity}":`, err)
+      if (reviewStageHadError) {
+        reviewSuggestionOutput = ""
+      } else {
+        checkpoint.reviewCompleted = true
+        checkpoint.reviewSuggestionOutput = reviewSuggestionOutput
+        await saveGenerationCheckpoint(pp, sourceSummarySlug, checkpoint)
+      }
     }
-    throwIfIngestAborted(signal, activityId)
-    if (reviewStageHadError) reviewSuggestionOutput = ""
   }
 
   // ── Step 3: Write files ───────────────────────────────────────
@@ -1185,12 +1697,15 @@ async function autoIngestImpl(
     activityId,
     onFileWritten,
     sourceContent,
+    () => { modelCalls.merge++ },
+    verifiedWrittenFiles,
+    persistCommittedFile,
   )
   throwIfIngestAborted(signal, activityId)
   const writtenPaths = writeResult.writtenPaths
   const completedInputPaths = [...writeResult.completedInputPaths]
-  const writeWarnings = writeResult.warnings
-  const hardFailures = writeResult.hardFailures
+  const writeWarnings = [...preparationWarnings, ...writeResult.warnings]
+  const hardFailures = [...writeResult.hardFailures]
   let unrecoveredTruncatedPaths = uniqueNormalizedPaths(
     writeResult.truncatedPaths.filter((path) =>
       !writtenPaths.some((writtenPath) => normalizePath(writtenPath) === normalizePath(path))
@@ -1204,6 +1719,7 @@ async function autoIngestImpl(
     let repairOutput = ""
     let repairFailed = false
     try {
+      modelCalls.repair++
       await streamChat(
         llmConfig,
         [
@@ -1262,6 +1778,9 @@ async function autoIngestImpl(
           activityId,
           onFileWritten,
           sourceContent,
+          () => { modelCalls.merge++ },
+          undefined,
+          persistCommittedFile,
         )
         // Match successful writes against the paths requested from the model,
         // not the final on-disk paths. writeFileBlocks may legitimately rewrite
@@ -1308,14 +1827,21 @@ async function autoIngestImpl(
   // truncation repair above cannot see them. Compare the analysis contract
   // with completed/on-disk pages and generate only the missing tail in small
   // batches. Successful ingests make no additional model calls.
-  const expectedKnowledgePaths = isCuratedPassthroughSource(enrichedSourceContent)
-    ? []
-    : extractExpectedKnowledgePaths(analysis)
   let incompleteExpectedPaths = await findMissingExpectedKnowledgePaths(
     pp,
     expectedKnowledgePaths,
     completedInputPaths,
   )
+
+  // A parser-level truncation is otherwise indistinguishable between a model
+  // output limit, a clean-but-early provider close, and a malformed response.
+  // Persist the wire facts beside the affected paths without retaining model
+  // output or credentials.
+  if (unrecoveredTruncatedPaths.length > 0) {
+    writeWarnings.push(
+      formatIncompleteGenerationDiagnostic("Initial wiki-page generation", generationCompletion),
+    )
+  }
   for (
     let attempt = 1;
     attempt <= MISSING_PAGE_REPAIR_ATTEMPTS && incompleteExpectedPaths.length > 0 && !signal?.aborted;
@@ -1329,6 +1855,7 @@ async function autoIngestImpl(
       let missingRepairOutput = ""
       let repairStreamFailed = false
       try {
+        modelCalls.repair++
         await streamChat(
           llmConfig,
           [
@@ -1378,16 +1905,19 @@ async function autoIngestImpl(
       if (repairStreamFailed || !missingRepairOutput.trim()) continue
       const filteredRepair = filterTruncatedFileRepairOutput(missingRepairOutput, batch)
       writeWarnings.push(...filteredRepair.warnings)
-      const repairResult = await writeFileBlocks(
+        const repairResult = await writeFileBlocks(
         pp,
         filteredRepair.text,
         llmConfig,
         sourceIdentity,
         sourceSummaryPath,
         signal,
-        activityId,
-        onFileWritten,
-        sourceContent,
+          activityId,
+          onFileWritten,
+          sourceContent,
+          () => { modelCalls.merge++ },
+          undefined,
+          persistCommittedFile,
       )
       for (const path of repairResult.writtenPaths) {
         if (!writtenPaths.some((writtenPath) => normalizePath(writtenPath) === normalizePath(path))) {
@@ -1529,6 +2059,20 @@ async function autoIngestImpl(
     await injectImagesIntoSourceSummary(pp, sourceIdentity, sourceSummarySlug, savedImages)
   }
 
+  // The model is responsible for prose; the application is responsible for
+  // navigation. This guarantees that every knowledge page actually written
+  // for the source appears as a clickable link in its source summary.
+  if (hasSourceSummary && !signal?.aborted) {
+    try {
+      await injectKnowledgeLinksIntoSourceSummary(pp, sourceSummaryPath, writtenPaths)
+    } catch (err) {
+      const message = `Source-summary knowledge-link update failed: ${err instanceof Error ? err.message : String(err)}`
+      writeWarnings.push(message)
+      hardFailures.push(message)
+      await appendIngestWarningLog(pp, sourceIdentity, [message])
+    }
+  }
+
   if (writtenPaths.length > 0) {
     try {
       await refreshProjectFileTree(pp, { bumpDataVersion: true })
@@ -1552,21 +2096,31 @@ async function autoIngestImpl(
   // otherwise the partial result would be replayed without another LLM turn.
   if (
     writtenPaths.length > 0 &&
+    preprocessingFailures.length === 0 &&
     hardFailures.length === 0 &&
     unrecoveredTruncatedPaths.length === 0 &&
     incompleteExpectedPaths.length === 0
   ) {
-    await saveIngestCache(pp, sourceIdentity, sourceContent, writtenPaths)
+    await saveIngestCache(
+      pp,
+      sourceIdentity,
+      sourceCacheMaterial,
+      writtenPaths,
+      pipelineSignature,
+      savedImages.map((image) => `wiki/${image.relPath}`),
+    )
     if (longSourceCheckpointPath) {
       await clearLongSourceCheckpoint(longSourceCheckpointPath)
     }
+    await clearGenerationCheckpoint(pp, sourceSummarySlug)
   } else if (
+    preprocessingFailures.length > 0 ||
     hardFailures.length > 0 ||
     unrecoveredTruncatedPaths.length > 0 ||
     incompleteExpectedPaths.length > 0
   ) {
     console.warn(
-      `[ingest] Skipping cache save for "${sourceIdentity}" — ${hardFailures.length} write failure(s), ${unrecoveredTruncatedPaths.length} truncated FILE block(s), ${incompleteExpectedPaths.length} expected page(s) still missing.`,
+      `[ingest] Skipping cache save for "${sourceIdentity}" — ${preprocessingFailures.length} preprocessing failure(s), ${hardFailures.length} write failure(s), ${unrecoveredTruncatedPaths.length} truncated FILE block(s), ${incompleteExpectedPaths.length} expected page(s) still missing.`,
     )
   }
 
@@ -1593,19 +2147,53 @@ async function autoIngestImpl(
   }
 
   const ingestComplete = writtenPaths.length > 0 &&
+    preprocessingFailures.length === 0 &&
     hardFailures.length === 0 &&
     unrecoveredTruncatedPaths.length === 0 &&
     incompleteExpectedPaths.length === 0
   const baseDetail = writtenPaths.length > 0
     ? `${writtenPaths.length} files written${reviewItems.length > 0 ? `, ${reviewItems.length} review item(s)` : ""}`
     : "No files generated"
-  const incompleteSummary = !ingestComplete
-    ? `Incomplete ingest: ${hardFailures.length} write failure(s), ${unrecoveredTruncatedPaths.length} truncated file(s), ${incompleteExpectedPaths.length} expected page(s) missing.`
+  const modelCallDetail = `model calls: analysis ${modelCalls.analysis}, generation ${modelCalls.generation}, repair ${modelCalls.repair}, review ${modelCalls.review}, merge ${modelCalls.merge}`
+  const reuseDetail = resumedKnowledgePages > 0 || resumedWrittenPages > 0
+    ? `; reused ${resumedKnowledgePages} generated and ${resumedWrittenPages} already-written page(s)`
     : ""
-  const detailBase = incompleteSummary ? `${baseDetail} — ${incompleteSummary}` : baseDetail
+  const incompleteSummary = !ingestComplete
+    ? `Incomplete ingest: ${preprocessingFailures.length} preprocessing failure(s), ${hardFailures.length} write failure(s), ${unrecoveredTruncatedPaths.length} truncated file(s), ${incompleteExpectedPaths.length} expected page(s) missing.${preprocessingFailures.length > 0 ? ` ${preprocessingFailures.join(" ")}` : ""}`
+    : ""
+  const detailBase = `${incompleteSummary ? `${baseDetail} — ${incompleteSummary}` : baseDetail}; ${modelCallDetail}${reuseDetail}`
   const detail = warningSummary
     ? `${detailBase} — ${warningSummary} (saved to .llm-wiki/ingest-warnings.log)`
     : detailBase
+
+  try {
+    await writeIngestDiagnosticReport(pp, sourceSummarySlug, {
+      source: sourceIdentity,
+      extractionMode: documentResult.extractionMode,
+      degraded: documentResult.degraded,
+      sourcePages: documentResult.sourcePageCount,
+      processedPages: documentResult.processedPageCount,
+      extractedImages: savedImages.length,
+      captionAttempted,
+      captionFresh,
+      captionCached,
+      captionFailed,
+      captionFailures: captionFailureDetails,
+      resumedKnowledgePages,
+      resumedWrittenPages,
+      modelCalls,
+      expectedKnowledgePages: expectedKnowledgePaths.length,
+      missingKnowledgePages: incompleteExpectedPaths,
+      warnings: writeWarnings,
+      failures: [...preprocessingFailures, ...hardFailures],
+      complete: ingestComplete,
+    })
+  } catch (err) {
+    console.warn(
+      `[ingest:diag] failed to persist diagnostic report for "${sourceIdentity}":`,
+      err instanceof Error ? err.message : err,
+    )
+  }
 
   activity.updateItem(activityId, {
     status: ingestComplete ? "done" : "error",
@@ -1614,7 +2202,7 @@ async function autoIngestImpl(
   })
 
   if (!ingestComplete) {
-    throw new Error(incompleteSummary || "Ingest produced no output files")
+    throw new IngestNeedsAttentionError(incompleteSummary || "Ingest produced no output files")
   }
 
   return writtenPaths
@@ -2130,6 +2718,9 @@ async function writeFileBlocks(
   activityId?: string,
   onFileWritten?: (relativePath: string) => void,
   sourceContent: string = "",
+  onMergeModelCall?: () => void,
+  resumeWrittenFiles?: readonly StoredWrittenFile[],
+  onFileCommitted?: (inputPath: string, finalPath: string, contentHash: string) => Promise<void>,
 ): Promise<{
   writtenPaths: string[]
   completedInputPaths: string[]
@@ -2154,6 +2745,9 @@ async function writeFileBlocks(
   // instead of replaying the partial result forever.
   const hardFailures: string[] = []
   const projectSchemaRouting = await loadProjectWikiSchemaRouting(projectPath)
+  const resumableWrites = new Map(
+    (resumeWrittenFiles ?? []).map((entry) => [normalizePath(entry.inputPath).toLowerCase(), entry]),
+  )
 
   const targetLang = useWikiStore.getState().outputLanguage
   const today = currentWikiDate()
@@ -2242,6 +2836,13 @@ async function writeFileBlocks(
 
   for (const { path: rawRelativePath, content: rawContent } of blocks) {
     throwIfIngestAborted(signal, activityId)
+    const resumedWrite = resumableWrites.get(normalizePath(rawRelativePath).toLowerCase())
+    if (resumedWrite) {
+      writtenPaths.push(resumedWrite.finalPath)
+      completedInputPaths.push(rawRelativePath)
+      onFileWritten?.(resumedWrite.finalPath)
+      continue
+    }
     let relativePath = rawRelativePath
     if (sourceSummaryPath && relativePath.startsWith("wiki/sources/")) {
       relativePath = sourceSummaryPath
@@ -2379,7 +2980,7 @@ async function writeFileBlocks(
         const merged = await mergePageContent(
           content,
           existing || null,
-          buildPageMerger(llmConfig),
+          buildPageMerger(llmConfig, onMergeModelCall),
           {
             sourceFileName,
             pagePath: relativePath,
@@ -2394,6 +2995,10 @@ async function writeFileBlocks(
         const repairedMerge = repairIngestReferences(toWrite, pathRedirects)
         repairedReferenceCount += repairedMerge.repairedCount
         await writeFile(fullPath, repairedMerge.content)
+      }
+      if (onFileCommitted) {
+        const committedContent = await readFile(fullPath)
+        await onFileCommitted(rawRelativePath, relativePath, hashTextHex(committedContent))
       }
       writtenPaths.push(relativePath)
       completedInputPaths.push(rawRelativePath)
@@ -2552,10 +3157,17 @@ export function buildAnalysisPrompt(
     "- Are there internal tensions or caveats?",
     "",
     "## Recommendations",
-    "- What wiki pages should be created or updated?",
+    "- Explain what should be emphasized, de-emphasized, or investigated further.",
+    "- Do not turn every mentioned term, heading, or existing-wiki connection into a standalone page. Prefer a cohesive topic page when several supporting concepts are best understood together.",
+    "",
+    "## Generation Contract",
+    "List only the standalone wiki pages that should actually be created or updated from this source.",
+    "Use one exact path-qualified wikilink per line, such as [[concepts/example]] or [[entities/example]], followed by a short reason.",
+    "A page belongs here only when the source contains enough evidence to explain it usefully, or when an existing page needs a meaningful source-backed update.",
+    "Links used elsewhere to explain relationships are context only and must not be repeated here unless this ingest should write that page.",
+    "This section is the generation contract: paths omitted here will remain links but will not trigger a model generation call.",
     "- If the project schema (below) defines page types beyond entity/concept (e.g. goal, habit, reflection, finding, decision, meeting), and the source genuinely contains matching content, recommend pages of those types — name the type explicitly. Only when the source actually supports it; never invent goals/habits/journal entries that aren't in the source.",
-    "- What should be emphasized vs. de-emphasized?",
-    "- Any open questions worth flagging for the user?",
+    "- Keep supporting details inside their parent topic page instead of creating thin pages.",
     "",
     "Be thorough but concise. Focus on what's genuinely important.",
     "",
@@ -2811,26 +3423,121 @@ type TruncatedFileRepairContext = {
 }
 
 /**
- * Collect only explicit entity/concept page paths from Stage 1. Bare
- * wikilinks are intentionally ignored so incidental prose references do not
- * become mandatory pages.
+ * Collect explicit path-qualified knowledge links from Stage 1. The folder
+ * name comes from the project's schema, so this works for concepts/entities
+ * as well as custom folders such as goals, lessons, components, or methods.
+ * Bare links and source/aggregate pages are intentionally not mandatory.
  */
-export function extractExpectedKnowledgePaths(analysis: string): string[] {
+export function extractExpectedKnowledgePaths(
+  analysis: string,
+  options: { fallbackToOutline?: boolean } = {},
+): string[] {
+  const generationContractHeading = /^##\s+Generation Contract\s*$/im.exec(analysis)
+  const recommendationsHeading = /^##\s+Recommendations\s*$/im.exec(analysis)
+  const heading = generationContractHeading ?? recommendationsHeading
+  let searchArea = ""
+  if (heading) {
+    const afterHeading = analysis.slice(heading.index + heading[0].length)
+    const nextHeading = afterHeading.search(/^##\s+/m)
+    searchArea = nextHeading >= 0 ? afterHeading.slice(0, nextHeading) : afterHeading
+  }
+  const collect = (content: string): string[] => {
   const expected: string[] = []
   const seen = new Set<string>()
-  const linkPattern = /\[\[((?:wiki\/)?(?:concepts|entities)\/[^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/gi
-  for (const match of analysis.matchAll(linkPattern)) {
+  const linkPattern = /\[\[((?:wiki\/)?[^\]|#\s]+\/[^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/gi
+  for (const match of content.matchAll(linkPattern)) {
     let candidate = match[1].trim().replace(/\\/g, "/")
     if (!candidate.startsWith("wiki/")) candidate = `wiki/${candidate}`
     if (!candidate.toLowerCase().endsWith(".md")) candidate += ".md"
     const normalized = normalizeRecoverableIngestPath(candidate)
     if (!normalized) continue
     const key = normalizePath(normalized).toLowerCase()
+    if (key.startsWith("wiki/sources/") || AGGREGATE_WIKI_PATHS.includes(key as typeof AGGREGATE_WIKI_PATHS[number])) {
+      continue
+    }
     if (seen.has(key)) continue
     seen.add(key)
     expected.push(normalized)
   }
   return expected
+  }
+
+  const contractPaths = searchArea ? collect(searchArea) : []
+  if (contractPaths.length > 0 || !options.fallbackToOutline) return contractPaths
+  return collect(analysis)
+}
+
+function hasNoStandalonePagesDeclaration(analysis: string): boolean {
+  const headings = [...analysis.matchAll(/^##\s+Generation Contract\s*$/gim)]
+  const heading = headings[headings.length - 1]
+  if (!heading || heading.index === undefined) return false
+  const afterHeading = analysis.slice(heading.index + heading[0].length)
+  const nextHeading = afterHeading.search(/^##\s+/m)
+  const contract = nextHeading >= 0 ? afterHeading.slice(0, nextHeading) : afterHeading
+  return /\bNO_STANDALONE_PAGES\s*:/i.test(contract)
+}
+
+/**
+ * Keep the evidence surrounding the requested page links when a consolidated
+ * long-document analysis is too large for one generation batch. A plain
+ * head/tail truncation can silently remove the middle chunk that introduced
+ * the page being generated.
+ */
+export function selectRelevantAnalysisForPaths(
+  analysis: string,
+  paths: readonly string[],
+  maxChars: number,
+): string {
+  if (analysis.length <= maxChars) return analysis
+  const intervals: Array<[number, number]> = [[0, Math.min(4_000, analysis.length)]]
+  const lowered = analysis.toLowerCase()
+  for (const path of paths) {
+    const normalized = normalizePath(path).replace(/^wiki\//i, "").replace(/\.md$/i, "")
+    const terms = [normalized, normalized.split("/").pop() ?? ""]
+      .map((term) => term.trim().toLowerCase())
+      .filter((term) => term.length >= 2)
+    for (const term of new Set(terms)) {
+      let from = 0
+      while (from < lowered.length) {
+        const index = lowered.indexOf(term, from)
+        if (index < 0) break
+        intervals.push([
+          Math.max(0, index - 1_500),
+          Math.min(analysis.length, index + term.length + 2_500),
+        ])
+        from = index + term.length
+      }
+    }
+  }
+  const merged = intervals
+    .sort((a, b) => a[0] - b[0])
+    .reduce<Array<[number, number]>>((result, current) => {
+      const previous = result[result.length - 1]
+      if (previous && current[0] <= previous[1] + 200) {
+        previous[1] = Math.max(previous[1], current[1])
+      } else {
+        result.push([...current])
+      }
+      return result
+    }, [])
+  const pieces: string[] = []
+  let remaining = maxChars
+  for (const [start, end] of merged) {
+    if (remaining <= 0) break
+    const piece = analysis.slice(start, Math.min(end, start + remaining)).trim()
+    if (!piece) continue
+    pieces.push(piece)
+    remaining -= piece.length
+  }
+  return pieces.length > 0 ? pieces.join("\n\n[...relevant evidence continues...]\n\n") : trimLongText(analysis, maxChars)
+}
+
+export function selectRelevantSourceContextForPaths(
+  sourceContext: string,
+  paths: readonly string[],
+  maxChars: number,
+): string {
+  return selectRelevantAnalysisForPaths(sourceContext, paths, maxChars)
 }
 
 async function findMissingExpectedKnowledgePaths(
@@ -2854,6 +3561,71 @@ function chunkArray<T>(items: readonly T[], size: number): T[][] {
     chunks.push(items.slice(index, index + size))
   }
   return chunks
+}
+
+function completedGenerationPaths(
+  blocks: readonly ParsedFileBlock[],
+  sourceSummaryPath: string,
+): Set<string> {
+  return new Set(blocks.map((block) => {
+    const normalized = normalizePath(block.path).toLowerCase()
+    return normalized.startsWith("wiki/sources/")
+      ? normalizePath(sourceSummaryPath).toLowerCase()
+      : normalized
+  }))
+}
+
+function buildInitialPageBatchPrompt(
+  paths: readonly string[],
+  sourceSummaryPath: string,
+  sourceIdentity: string,
+  context: TruncatedFileRepairContext,
+): string {
+  const { schema, purpose, analysis, sourceContext, maxContextSize } = context
+  const { maxCtx } = computeContextBudget(maxContextSize)
+  const sectionCap = Math.max(6_000, Math.floor(maxCtx * 0.16))
+  const includesSummary = paths.some(
+    (path) => normalizePath(path).toLowerCase() === normalizePath(sourceSummaryPath).toLowerCase(),
+  )
+  return [
+    "Based on the analysis below, generate the requested bounded batch of wiki files.",
+    "You are generating one bounded batch of files for a personal wiki.",
+    "Return exactly one complete FILE block for every requested path and no other files.",
+    "Every block must end with `---END FILE---`. Output no preamble, REVIEW blocks, or trailing commentary.",
+    "Each page must contain complete YAML frontmatter with type, title, created, updated, tags, related, and sources.",
+    `Every page must include ${JSON.stringify(sourceIdentity)} in frontmatter sources.`,
+    includesSummary
+      ? `Write the source summary page at **${sourceSummaryPath}**. Preserve the source's full structural outline, major findings, evidence, limitations, and visual knowledge; do not turn it into a one-paragraph abstract.`
+      : "Keep every requested knowledge page evidence-bound and sufficiently detailed to answer focused questions without reopening the source.",
+    "Use body wikilinks when referring to another page, but do not invent pages outside the requested list.",
+    "Use the exact requested paths.",
+    "",
+    languageRule(sourceContext),
+    "",
+    "## Requested paths",
+    ...paths.map((path) => `- ${path}`),
+    "",
+    `The original source file is: **${sourceIdentity}**`,
+    schema ? `## Project schema\n${trimLongText(schema, sectionCap)}` : "",
+    purpose ? `## Wiki purpose\n${trimLongText(purpose, sectionCap)}` : "",
+    `## Stage 1 analysis\n${selectRelevantAnalysisForPaths(analysis, paths, sectionCap)}`,
+    `## Source Context\n${selectRelevantSourceContextForPaths(sourceContext, paths, sectionCap)}`,
+    "",
+    "## FILE format",
+    "---FILE: wiki/path/page.md---",
+    "---",
+    "type: concept",
+    "title: Example",
+    "created: YYYY-MM-DD",
+    "updated: YYYY-MM-DD",
+    "tags: []",
+    "related: []",
+    `sources: [${JSON.stringify(sourceIdentity)}]`,
+    "---",
+    "# Example",
+    "Complete evidence-bound content.",
+    "---END FILE---",
+  ].filter(Boolean).join("\n")
 }
 
 function buildMissingPageRepairPrompt(
@@ -2880,8 +3652,8 @@ function buildMissingPageRepairPrompt(
     `## Source identity\n${sourceIdentity}`,
     schema ? `## Project schema\n${trimLongText(schema, sectionCap)}` : "",
     purpose ? `## Wiki purpose\n${trimLongText(purpose, sectionCap)}` : "",
-    `## Stage 1 analysis\n${trimLongText(analysis, sectionCap)}`,
-    `## Source context\n${trimLongText(sourceContext, sectionCap)}`,
+    `## Stage 1 analysis\n${selectRelevantAnalysisForPaths(analysis, paths, sectionCap)}`,
+    `## Source context\n${selectRelevantSourceContextForPaths(sourceContext, paths, sectionCap)}`,
   ].filter(Boolean).join("\n")
 }
 
@@ -2907,8 +3679,8 @@ function buildTruncatedFileRepairPrompt(
     `## Source identity\n${sourceIdentity}`,
     schema ? `## Project schema\n${trimLongText(schema, sectionCap)}` : "",
     purpose ? `## Wiki purpose\n${trimLongText(purpose, sectionCap)}` : "",
-    `## Stage 1 analysis\n${trimLongText(analysis, sectionCap)}`,
-    `## Source context\n${trimLongText(sourceContext, sectionCap)}`,
+    `## Stage 1 analysis\n${selectRelevantAnalysisForPaths(analysis, paths, sectionCap)}`,
+    `## Source context\n${selectRelevantSourceContextForPaths(sourceContext, paths, sectionCap)}`,
   ].filter(Boolean).join("\n")
 }
 
@@ -3178,7 +3950,7 @@ function isCompatibleLongSourceCheckpoint(
     chunkTotal: number
   },
 ): boolean {
-  return checkpoint.version === 1
+  return checkpoint.version === 2
     && checkpoint.sourceIdentity === params.sourceIdentity
     && checkpoint.sourceHash === params.sourceHash
     && checkpoint.sourceLength === params.sourceLength
@@ -3260,7 +4032,9 @@ function buildChunkAnalysisSystemPrompt(
     "",
     "## Updated Global Digest",
     "A compact document-level digest that incorporates this chunk and preserves prior cross-chunk context.",
-    "Keep this digest structured under: Summary, Entities, Concepts, Schema-Typed Candidates, Claims, Evidence, Contradictions, Open Questions, Cross-Chunk Relations.",
+    "Keep this digest structured under: Summary, Entities, Concepts, Schema-Typed Candidates, Claims, Evidence, Contradictions, Open Questions, Cross-Chunk Relations, Generation Contract.",
+    "Under Generation Contract, list one exact path-qualified wikilink for every standalone page the complete document supports, for example [[concepts/example]]. Preserve useful candidates from earlier chunks unless later evidence disproves them.",
+    "If the complete document genuinely supports no standalone page, write exactly: NO_STANDALONE_PAGES: followed by a short factual reason.",
     "Use schema-defined types only when the source actually supports them; never invent goals, habits, journal entries, decisions, or similar user-authored records that are not present in the source.",
     "",
     "Stable project context follows. It changes rarely and should be treated as background:",
@@ -3307,6 +4081,7 @@ async function analyzeLongSourceInChunks(
   sourceBudget: number,
   activityId: string,
   signal?: AbortSignal,
+  onModelCall?: () => void,
 ): Promise<LongSourcePlan> {
   const targetChars = clampNumber(Math.floor(sourceBudget * 0.55), LONG_SOURCE_CHUNK_MIN, LONG_SOURCE_CHUNK_MAX)
   const overlapChars = clampNumber(Math.floor(targetChars * 0.08), 800, 3_000)
@@ -3347,35 +4122,49 @@ async function analyzeLongSourceInChunks(
     })
 
     let raw = ""
-    let hadError = false
-    await streamChat(
-      llmConfig,
-      [
-        { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: buildChunkAnalysisUserPrompt(
-            sourceIdentity,
-            folderContext,
-            chunk,
-            trimLongText(globalDigest, LONG_SOURCE_DIGEST_MAX),
-          ),
-        },
-      ],
-      {
-        onToken: (token) => { raw += token },
-        onDone: () => {},
-        onError: (err) => {
-          hadError = true
-          activity.updateItem(activityId, { status: "error", detail: `Chunk analysis failed: ${err.message}` })
-        },
-      },
-      signal,
-      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 4096 },
-    )
+    let chunkError: Error | null = null
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      raw = ""
+      chunkError = null
+      try {
+        onModelCall?.()
+        await streamChat(
+          llmConfig,
+          [
+            { role: "system", content: systemPrompt },
+            {
+              role: "user",
+              content: buildChunkAnalysisUserPrompt(
+                sourceIdentity,
+                folderContext,
+                chunk,
+                trimLongText(globalDigest, LONG_SOURCE_DIGEST_MAX),
+              ),
+            },
+          ],
+          {
+            onToken: (token) => { raw += token },
+            onDone: () => {},
+            onError: (err) => { chunkError = err },
+          },
+          signal,
+          { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 4096 },
+        )
+      } catch (err) {
+        chunkError = err instanceof Error ? err : new Error(String(err))
+      }
 
-    throwIfIngestAborted(signal, activityId)
-    if (hadError) throw new Error("Chunk analysis stream failed")
+      throwIfIngestAborted(signal, activityId)
+      if (!chunkError && raw.trim()) break
+      const message = chunkError?.message || "empty response"
+      if (attempt >= 3 || !isTransientIngestServiceError(message)) {
+        throw new Error(`Chunk analysis stream failed: ${message}`)
+      }
+      activity.updateItem(activityId, {
+        detail: `Model service is temporarily busy; retrying chunk ${chunk.index}/${chunk.total} (${attempt}/3)...`,
+      })
+      await waitForIngestRetry(attempt === 1 ? 2_000 : 5_000, signal)
+    }
 
     const chunkAnalysis = extractMarkedSection(raw, "Chunk Analysis") || raw.trim()
     const nextDigest = extractMarkedSection(raw, "Updated Global Digest")
@@ -3390,7 +4179,7 @@ async function analyzeLongSourceInChunks(
     )
     completedThrough = chunk.index
     await saveLongSourceCheckpoint(checkpointPath, {
-      version: 1,
+      version: 2,
       ...checkpointParams,
       completedThrough,
       globalDigest,
@@ -3424,13 +4213,71 @@ async function analyzeLongSourceInChunks(
   return { chunked: true, analysis, sourceContext, checkpointPath }
 }
 
+async function finalizeLongSourceKnowledgePlan(
+  llmConfig: LlmConfig,
+  analysis: string,
+  schema: string,
+  sourceIdentity: string,
+  signal: AbortSignal | undefined,
+  onModelCall?: () => void,
+): Promise<string> {
+  const systemPrompt = [
+    "You are finalizing the knowledge-page plan for a long document that has already been analyzed in chunks.",
+    "Do not re-summarize the document and do not output hidden reasoning.",
+    "Return exactly one markdown section headed ## Generation Contract.",
+    "List one exact path-qualified wikilink per line for every standalone page supported by the analysis, for example [[concepts/example]] or [[entities/example]], followed by a short reason.",
+    "Keep supporting details on their parent topic page instead of creating thin pages.",
+    "If no standalone page is justified, return exactly: ## Generation Contract followed by NO_STANDALONE_PAGES: and a short factual reason.",
+    schema ? `Project schema:\n${schema}` : "",
+  ].filter(Boolean).join("\n\n")
+  const userPrompt = [
+    `Source file: ${sourceIdentity}`,
+    "Consolidated analysis:",
+    trimLongText(analysis, 100_000),
+  ].join("\n\n")
+
+  let output = ""
+  let lastError: Error | null = null
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    output = ""
+    lastError = null
+    try {
+      onModelCall?.()
+      await streamChat(
+        llmConfig,
+        [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        {
+          onToken: (token) => { output += token },
+          onDone: () => {},
+          onError: (err) => { lastError = err },
+        },
+        signal,
+        { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 4096 },
+      )
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+    }
+    throwIfIngestAborted(signal)
+    if (!lastError && output.trim()) return output.trim()
+    const message = lastError?.message || "empty response"
+    if (attempt >= 3 || !isTransientIngestServiceError(message)) {
+      throw new Error(message)
+    }
+    await waitForIngestRetry(attempt === 1 ? 2_000 : 5_000, signal)
+  }
+  throw new Error("empty response")
+}
+
 /**
  * Build a MergeFn for a given LLM config. The returned function asks
  * the model to merge two versions of the same wiki page into one.
  * Page-merge.ts handles all the sanity-checking and fallback paths;
  * this is just the "stream the LLM" wrapper.
  */
-function buildPageMerger(llmConfig: LlmConfig): MergeFn {
+function buildPageMerger(llmConfig: LlmConfig, onModelCall?: () => void): MergeFn {
   return async (existingContent, incomingContent, sourceFileName, signal) => {
     const systemPrompt = buildPageMergeSystemPrompt()
 
@@ -3452,6 +4299,7 @@ function buildPageMerger(llmConfig: LlmConfig): MergeFn {
 
     let result = ""
     let streamError: Error | null = null
+    onModelCall?.()
     await new Promise<void>((resolve) => {
       streamChat(
         llmConfig,
@@ -3612,41 +4460,79 @@ async function injectImagesIntoSourceSummary(
   }
 }
 
-/**
- * Re-embed the source-summary page after we've rewritten its
- * `## Embedded Images` safety-net section with captions. The full
- * autoIngest pipeline calls `embedPage` at step 6 unconditionally;
- * this is the cache-hit equivalent (where step 6 is skipped) and
- * exists specifically to keep the search index in sync after a
- * caption refresh.
- *
- * Why not just call `embedPage` inline at the call site: the
- * embedding store + config lookup, the readFile-then-parse-title
- * dance, and the no-op behavior when embedding is disabled all
- * already exist in the step-6 logic. Wrapping them once here
- * avoids drift between the two paths if either side changes.
- */
-async function reembedSourceSummary(
-  pp: string,
-  sourceIdentity: string,
-  sourceSummarySlug: string,
+interface IngestDiagnosticReport {
+  source: string
+  extractionMode: DocumentIngestResult["extractionMode"]
+  degraded: boolean
+  sourcePages: number | null
+  processedPages: number | null
+  extractedImages: number
+  captionAttempted: number
+  captionFresh: number
+  captionCached: number
+  captionFailed: number
+  captionFailures: Array<{ url: string; message: string }>
+  resumedKnowledgePages: number
+  resumedWrittenPages: number
+  modelCalls: IngestModelCallCounts
+  expectedKnowledgePages: number
+  missingKnowledgePages: string[]
+  warnings: string[]
+  failures: string[]
+  complete: boolean
+}
+
+async function writeIngestDiagnosticReport(
+  projectPath: string,
+  sourceSlug: string,
+  report: IngestDiagnosticReport,
 ): Promise<void> {
-  const embCfg = useWikiStore.getState().embeddingConfig
-  if (!embCfg.enabled || !embCfg.model) return
-  const sourceSummaryFullPath = `${pp}/wiki/sources/${sourceSummarySlug}.md`
-  try {
-    const content = await readFile(sourceSummaryFullPath)
-    const fmTitle = parseFrontmatter(content).frontmatter?.title
-    const title = typeof fmTitle === "string" && fmTitle.trim() ? fmTitle.trim() : sourceIdentity
-    const { embedPage } = await import("@/lib/embedding")
-    await embedPage(pp, sourceSummarySlug, title, content, embCfg)
-    console.log(`[ingest:caption] re-embedded ${sourceSummarySlug} with captioned alt text`)
-  } catch (err) {
-    console.warn(
-      `[ingest:caption] re-embed failed for ${sourceSummarySlug}:`,
-      err instanceof Error ? err.message : err,
-    )
+  const directory = `${projectPath}/.llm-wiki/ingest-diagnostics`
+  await createDirectory(directory)
+  await writeFileAtomic(
+    `${directory}/${sourceSlug}.json`,
+    JSON.stringify({ ...report, recordedAt: new Date().toISOString() }, null, 2),
+  )
+}
+
+async function injectKnowledgeLinksIntoSourceSummary(
+  projectPath: string,
+  sourceSummaryPath: string,
+  writtenPaths: readonly string[],
+): Promise<void> {
+  const summaryFullPath = `${projectPath}/${sourceSummaryPath}`
+  const existing = await readFile(summaryFullPath)
+  const candidates = uniqueNormalizedPaths(writtenPaths)
+    .filter((path) => {
+      const normalized = normalizePath(path).toLowerCase()
+      return normalized.startsWith("wiki/") &&
+        normalized.endsWith(".md") &&
+        normalized !== normalizePath(sourceSummaryPath).toLowerCase() &&
+        !normalized.startsWith("wiki/sources/") &&
+        !AGGREGATE_WIKI_PATHS.includes(normalized as typeof AGGREGATE_WIKI_PATHS[number])
+    })
+
+  const links: Array<{ target: string; title: string }> = []
+  for (const path of candidates) {
+    const fullPath = `${projectPath}/${path}`
+    if (!(await fileExists(fullPath))) continue
+    const content = await readFile(fullPath)
+    const parsed = parseFrontmatter(content)
+    const fallbackTitle = getFileName(path).replace(/\.md$/i, "")
+    const title = typeof parsed.frontmatter?.title === "string" && parsed.frontmatter.title.trim()
+      ? parsed.frontmatter.title.trim()
+      : fallbackTitle
+    const target = normalizePath(path).replace(/^wiki\//i, "").replace(/\.md$/i, "")
+    links.push({ target, title })
   }
+  if (links.length === 0) return
+  const updated = upsertSourceKnowledgeLinks(existing, links)
+  for (const link of links) {
+    if (!updated.includes(`[[${link.target}|`)) {
+      throw new Error(`The source summary is missing its link to ${link.target}.`)
+    }
+  }
+  await writeFileAtomic(summaryFullPath, updated)
 }
 
 export async function startIngest(

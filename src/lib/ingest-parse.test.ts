@@ -23,6 +23,8 @@ import {
   isSafeIngestPath,
   normalizeRecoverableIngestPath,
   extractExpectedKnowledgePaths,
+  selectRelevantAnalysisForPaths,
+  selectRelevantSourceContextForPaths,
   stampGeneratedFrontmatterDates,
   stampGeneratedLogDate,
   buildGenerationPrompt,
@@ -33,6 +35,7 @@ import {
   isAppManagedAggregatePath,
   updateBoundedRecentIndexSection,
   filterTruncatedFileRepairOutput,
+  savedImageCaptionUrls,
 } from "./ingest"
 
 // ── Happy paths ─────────────────────────────────────────────────────
@@ -561,15 +564,37 @@ describe("parseFileBlocks — path-traversal guard end-to-end", () => {
   })
 })
 
+describe("saved image caption targets", () => {
+  it("keeps nested rendered PDF pages as exact caption targets", () => {
+    const urls = savedImageCaptionUrls("D:/知识库", [{
+      relPath: "media/化学九年级下册/pages/page-0001.png",
+      absPath: "D:/知识库/wiki/media/化学九年级下册/pages/page-0001.png",
+    }])
+
+    expect(urls).toContain("media/化学九年级下册/pages/page-0001.png")
+    expect(urls).toContain("D:/知识库/wiki/media/化学九年级下册/pages/page-0001.png")
+  })
+})
+
 describe("extractExpectedKnowledgePaths", () => {
-  it("collects only explicit entity/concept paths, deduplicates them, and normalizes recoverable names", () => {
+  it("treats only recommendation links as the generation contract", () => {
     const analysis = [
+      "## Key Concepts",
+      "- [[concepts/已有概念]] — related context, not a requested rewrite",
+      "",
+      "## Connections to Existing Wiki",
+      "- [[concepts/改革开放]] — an existing page related to the source",
+      "",
+      "## Recommendations",
       "- [[concepts/椭圆]] — definition",
       "- [[concepts/椭圆|椭圆曲线]] — duplicate alias",
       '- [[concepts/坐标法"三步曲"]] — quoted title',
       "- [[entities/笛卡儿.md]] — person",
       "- [[ordinary-bare-link]] — incidental",
       "- [[sources/paper]] — source pages are not mandatory knowledge pages",
+      "",
+      "## Open Questions",
+      "- Compare with [[concepts/不应生成的后续问题]]",
     ].join("\n")
 
     expect(extractExpectedKnowledgePaths(analysis)).toEqual([
@@ -577,6 +602,86 @@ describe("extractExpectedKnowledgePaths", () => {
       "wiki/concepts/坐标法三步曲.md",
       "wiki/entities/笛卡儿.md",
     ])
+  })
+
+  it("honors custom schema folders while excluding source and aggregate pages", () => {
+    expect(extractExpectedKnowledgePaths([
+      "## Recommendations",
+      "- [[lessons/第一课|第一课]]",
+      "- [[wiki/components/search-pipeline]]",
+      "- [[sources/book]]",
+      "- [[overview]]",
+    ].join("\n"))).toEqual([
+      "wiki/lessons/第一课.md",
+      "wiki/components/search-pipeline.md",
+    ])
+  })
+
+  it("returns no mandatory generation pages when analysis contains links but no recommendations section", () => {
+    expect(extractExpectedKnowledgePaths([
+      "## Key Concepts",
+      "- [[concepts/已有概念]] — contextual reference",
+      "",
+      "## Connections to Existing Wiki",
+      "- [[entities/已有实体]] — related existing knowledge",
+    ].join("\n"))).toEqual([])
+  })
+
+  it("recovers explicit knowledge links from a legacy long-document outline", () => {
+    const analysis = [
+      "# Consolidated Long-Document Analysis",
+      "",
+      "## Final Global Digest",
+      "### Entities",
+      "- [[entities/邓小平]] — central historical figure",
+      "",
+      "### Concepts",
+      "- [[concepts/改革开放]] — central policy",
+      "- [[concepts/经济特区]] — implementation mechanism",
+      "",
+      "### Connections to Existing Wiki",
+      "- [[sources/另一份教材]] — source context only",
+    ].join("\n")
+
+    expect(extractExpectedKnowledgePaths(analysis, { fallbackToOutline: true })).toEqual([
+      "wiki/entities/邓小平.md",
+      "wiki/concepts/改革开放.md",
+      "wiki/concepts/经济特区.md",
+    ])
+  })
+
+  it("keeps middle-of-document evidence for the requested generation batch", () => {
+    const analysis = [
+      "# Global digest\nOverview",
+      "x".repeat(8_000),
+      "## Chunk 8\nEvidence for [[components/search-pipeline]]: hybrid retrieval and reranking.",
+      "y".repeat(8_000),
+    ].join("\n")
+    const selected = selectRelevantAnalysisForPaths(
+      analysis,
+      ["wiki/components/search-pipeline.md"],
+      7_000,
+    )
+    expect(selected).toContain("hybrid retrieval and reranking")
+    expect(selected.length).toBeLessThanOrEqual(7_100)
+  })
+
+  it("sends a generation batch the source evidence around its requested topics", () => {
+    const source = [
+      "# 教材目录\n第一单元概览",
+      "x".repeat(9_000),
+      "改革开放包括经济特区、沿海开放城市和逐步扩大的对外开放格局。",
+      "y".repeat(9_000),
+    ].join("\n")
+    const selected = selectRelevantSourceContextForPaths(
+      source,
+      ["wiki/concepts/改革开放.md"],
+      7_000,
+    )
+
+    expect(selected).toContain("经济特区、沿海开放城市")
+    expect(selected).toContain("第一单元概览")
+    expect(selected.length).toBeLessThanOrEqual(7_100)
   })
 })
 

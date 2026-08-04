@@ -197,6 +197,32 @@ export async function extractAndSaveSourceImages(
   }
 }
 
+/** Render every PDF page for the strict visual fallback path. */
+export async function renderAndSavePdfPages(
+  projectPath: string,
+  sourcePath: string,
+  slugOverride?: string,
+): Promise<SavedImage[]> {
+  const pp = normalizePath(projectPath)
+  const sp = normalizePath(sourcePath)
+  const fileName = getFileName(sp)
+  if (fileName.split(".").pop()?.toLowerCase() !== "pdf") return []
+  const slug = slugOverride ?? fileName.replace(/\.[^.]+$/, "")
+  const destDir = `${pp}/wiki/media/${slug}/pages`
+  const images = await invoke<unknown[]>("render_and_save_pdf_pages_cmd", {
+    sourcePath: sp,
+    destDir,
+    relTo: `${pp}/wiki`,
+  })
+  return images.filter((item): item is SavedImage => {
+    if (!item || typeof item !== "object") return false
+    const value = item as Record<string, unknown>
+    return typeof value.index === "number" &&
+      typeof value.relPath === "string" &&
+      typeof value.absPath === "string"
+  })
+}
+
 export async function extractAndSaveMarkdownImages(
   projectPath: string,
   sourcePath: string,

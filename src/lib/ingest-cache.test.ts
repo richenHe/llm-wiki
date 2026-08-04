@@ -28,6 +28,19 @@ describe("ingest-cache — checkIngestCache", () => {
     expect(result).toBeNull()
   })
 
+  it("invalidates a legacy entry that has no pipeline signature", async () => {
+    mockReadFile.mockResolvedValue(JSON.stringify({
+      entries: {
+        "foo.pdf": {
+          hash: "unused",
+          timestamp: 1,
+          filesWritten: ["wiki/sources/foo.md"],
+        },
+      },
+    }))
+    expect(await checkIngestCache("/project", "foo.pdf", "content")).toBeNull()
+  })
+
   it("treats a legacy empty object as an empty cache", async () => {
     mockReadFile.mockResolvedValue("{}")
     const result = await checkIngestCache(
@@ -82,6 +95,22 @@ describe("ingest-cache — checkIngestCache", () => {
 
     const result = await checkIngestCache("/project", "foo.pdf", "hello")
     expect(result).toBeNull()
+  })
+
+  it("returns null when a required media artifact is missing", async () => {
+    let persisted = ""
+    mockReadFile.mockImplementation(async () => persisted || JSON.stringify({ entries: {} }))
+    mockWriteFile.mockImplementation(async (_p: string, c: string) => { persisted = c })
+    await saveIngestCache(
+      "/project",
+      "foo.pdf",
+      "hello",
+      ["wiki/sources/foo.md"],
+      "document-pipeline-v2",
+      ["wiki/media/foo/img-1.png"],
+    )
+    mockFileExists.mockImplementation(async (path: string) => !path.includes("img-1.png"))
+    expect(await checkIngestCache("/project", "foo.pdf", "hello")).toBeNull()
   })
 
   it("returns null when the content hash no longer matches (cache stale on content change)", async () => {

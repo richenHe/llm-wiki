@@ -71,6 +71,7 @@ import { autoIngest } from "./ingest"
 import { readFile, writeFile } from "@/commands/fs"
 import { sweepResolvedReviews } from "./sweep-reviews"
 import { useWikiStore } from "@/stores/wiki-store"
+import { IngestNeedsAttentionError } from "./ingest-errors"
 
 const mockAutoIngest = vi.mocked(autoIngest)
 const mockReadFile = vi.mocked(readFile)
@@ -156,6 +157,23 @@ describe("ingest-queue — enqueue & basic processing", () => {
 })
 
 describe("ingest-queue — retry & failure", () => {
+  it("does not repeat a whole source when only targeted knowledge pages need attention", async () => {
+    mockAutoIngest.mockRejectedValue(
+      new IngestNeedsAttentionError("2 expected pages remain; saved progress is reusable"),
+    )
+
+    await enqueueIngest(TEST_ID, "partial.md")
+    await flushMicrotasks(20)
+
+    expect(mockAutoIngest).toHaveBeenCalledOnce()
+    expect(getQueue()).toHaveLength(1)
+    expect(getQueue()[0]).toMatchObject({
+      status: "failed",
+      retryCount: 1,
+    })
+    expect(getQueue()[0].error).toContain("saved progress is reusable")
+  })
+
   it("retries a failing task up to MAX_RETRIES=3 then marks failed", async () => {
     mockAutoIngest.mockRejectedValue(new Error("LLM error"))
 
@@ -455,8 +473,8 @@ describe("ingest-queue — restoreQueue", () => {
         folderContext: "",
         status: "processing",
         addedAt: 0,
-        error: null,
-        retryCount: 0,
+        error: "interrupted previous attempt",
+        retryCount: 2,
       },
     ]
     mockReadFile.mockResolvedValue(JSON.stringify(saved))
@@ -466,6 +484,8 @@ describe("ingest-queue — restoreQueue", () => {
     const queue = getQueue()
     expect(queue).toHaveLength(1)
     expect(queue[0].status).toBe("pending")
+    expect(queue[0].error).toBeNull()
+    expect(queue[0].retryCount).toBe(0)
     expect(getQueueSummary().paused).toBe(true)
     expect(mockAutoIngest).not.toHaveBeenCalled()
   })

@@ -113,7 +113,8 @@ async function setup(scenario: IngestScenario): Promise<Ctx> {
     path.join(FIXTURES_ROOT, scenario.name, "llm-generation.txt"),
     "utf-8",
   )
-  pendingResponses = [analysis, generation]
+  const reviewBlocks = generation.match(/---REVIEW:[\s\S]*?---END REVIEW---/g)?.join("\n\n") ?? ""
+  pendingResponses = [analysis, generation, reviewBlocks]
 
   return { tmp }
 }

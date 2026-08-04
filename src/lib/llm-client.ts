@@ -10,8 +10,26 @@ export { isFetchNetworkError } from "./tauri-fetch"
 export interface StreamCallbacks {
   onToken: (token: string) => void
   onReasoningToken?: (token: string) => void
-  onDone: () => void
+  /**
+   * HTTP streaming providers can report why they ended. Callers that do not
+   * need this may keep using `onDone: () => {}`.
+   */
+  onDone: (completion?: StreamCompletion) => void
   onError: (error: Error) => void
+}
+
+/**
+ * End-of-stream facts observed on the wire. These are diagnostics, not an
+ * assertion that the generated answer followed the caller's output format.
+ */
+export interface StreamCompletion {
+  transport: "http-stream"
+  /** Whether the OpenAI-compatible `[DONE]` marker was received. */
+  sawDoneMarker: boolean
+  /** Provider-reported reason such as `stop` or `length`, when supplied. */
+  finishReason?: string
+  contentChars: number
+  reasoningChars: number
 }
 
 function bufferedStreamCallbacks(callbacks: StreamCallbacks): StreamCallbacks {
@@ -20,10 +38,10 @@ function bufferedStreamCallbacks(callbacks: StreamCallbacks): StreamCallbacks {
   return {
     onToken: (token) => { content += token },
     onReasoningToken: (token) => { reasoning += token },
-    onDone: () => {
+    onDone: (completion) => {
       if (reasoning) callbacks.onReasoningToken?.(reasoning)
       if (content) callbacks.onToken(content)
-      callbacks.onDone()
+      callbacks.onDone(completion)
     },
     onError: callbacks.onError,
   }
@@ -65,6 +83,27 @@ function parseLines(chunk: Uint8Array, buffer: string): [string[], string] {
 function isRequestCancelledError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
   return /^request cancel(?:l)?ed$/i.test(message.trim())
+}
+
+function observeOpenAiStreamCompletion(
+  line: string,
+  state: { sawDoneMarker: boolean; finishReason?: string },
+): void {
+  if (!line.startsWith("data:")) return
+  const data = line.slice(5).trim()
+  if (data === "[DONE]") {
+    state.sawDoneMarker = true
+    return
+  }
+  try {
+    const parsed = JSON.parse(data) as {
+      choices?: Array<{ finish_reason?: unknown }>
+    }
+    const reason = parsed.choices?.[0]?.finish_reason
+    if (typeof reason === "string" && reason.trim()) state.finishReason = reason.trim()
+  } catch {
+    // Not an OpenAI JSON chunk. The provider-specific parser handles it.
+  }
 }
 
 export function isReasoningOnlyResponseError(err: unknown): boolean {
@@ -263,6 +302,7 @@ export async function streamChat(
   // detector.ts.
   let contentCharsEmitted = 0
   let reasoningCharsObserved = 0
+  const streamCompletion = { sawDoneMarker: false, finishReason: undefined as string | undefined }
   const recordToken = (text: string) => {
     contentCharsEmitted += text.length
     onToken(text)
@@ -281,6 +321,7 @@ export async function streamChat(
       if (done) {
         if (lineBuffer.trim()) {
           const trimmed = lineBuffer.trim()
+          observeOpenAiStreamCompletion(trimmed, streamCompletion)
           reasoningCharsObserved += countReasoningCharsInLine(trimmed)
           recordReasoning(trimmed)
           const token = providerConfig.parseStream(trimmed)
@@ -295,6 +336,7 @@ export async function streamChat(
       for (const line of lines) {
         const trimmed = line.trim()
         if (!trimmed) continue
+        observeOpenAiStreamCompletion(trimmed, streamCompletion)
         reasoningCharsObserved += countReasoningCharsInLine(trimmed)
         recordReasoning(trimmed)
         const token = providerConfig.parseStream(trimmed)
@@ -324,7 +366,13 @@ export async function streamChat(
       return
     }
 
-    onDone()
+    onDone({
+      transport: "http-stream",
+      sawDoneMarker: streamCompletion.sawDoneMarker,
+      finishReason: streamCompletion.finishReason,
+      contentChars: contentCharsEmitted,
+      reasoningChars: reasoningCharsObserved,
+    })
   } catch (err) {
     // The abort can reach us two ways: a real AbortError, or — when the
     // Tauri HTTP plugin tears down the body stream — a bare *string*

@@ -14,6 +14,7 @@ vi.mock("@/commands/fs", () => realFs)
 let sourceMarkers: string[] = []
 let failLongChunksOnce = new Set<number>()
 let extraReviewResponse = ""
+let generationBodySuffix = ""
 let generationSuffix = ""
 let truncatedRepairResponse = ""
 let missingPageRepairResponse = ""
@@ -21,6 +22,16 @@ let analysisOverride = ""
 let abortDuringReview: AbortController | null = null
 let interactiveGenerationOverride = ""
 let mergeRequestCount = 0
+let generationBatchRequests: string[][] = []
+let generationBatchResponder: ((paths: string[], requestIndex: number) => {
+  output?: string
+  error?: string
+}) | null = null
+let longSourceDigestLinks: string[] = []
+let longSourceFinalPlan = [
+  "## Generation Contract",
+  "NO_STANDALONE_PAGES: the test fixture contains repeated placeholder text only.",
+].join("\n")
 
 vi.mock("./llm-client", () => ({
   streamChat: vi.fn(async (_cfg, messages, cb) => {
@@ -75,6 +86,7 @@ vi.mock("./llm-client", () => ({
         "",
         "## Updated Global Digest",
         `Digest after chunk ${chunkIndex}: stable context ${chunkIndex}.`,
+        ...longSourceDigestLinks,
       ].join("\n"))
       cb.onDone()
       return
@@ -96,9 +108,28 @@ vi.mock("./llm-client", () => ({
       return
     }
 
+    if (systemPrompt.startsWith("You are finalizing the knowledge-page plan for a long document")) {
+      cb.onToken(longSourceFinalPlan)
+      cb.onDone()
+      return
+    }
+
     if (systemPrompt.startsWith("You are completing wiki pages")) {
       cb.onToken(missingPageRepairResponse)
       cb.onDone()
+      return
+    }
+
+    if (generationBatchResponder && systemPrompt.startsWith("Based on the analysis below")) {
+      const requestedSection = systemPrompt.split("## Requested paths")[1]?.split("## Source Context")[0] ?? ""
+      const paths = Array.from(requestedSection.matchAll(/^-\s+(wiki\/[^\s]+\.md)\s*$/gm))
+        .map((match) => match[1])
+      const requestIndex = generationBatchRequests.length
+      generationBatchRequests.push(paths)
+      const response = generationBatchResponder(paths, requestIndex)
+      if (response.output) cb.onToken(response.output)
+      if (response.error) cb.onError(new Error(response.error))
+      else cb.onDone()
       return
     }
 
@@ -125,6 +156,7 @@ vi.mock("./llm-client", () => ({
       `# ${marker}`,
       "",
       `Configuration details for ${marker}.`,
+      generationBodySuffix,
       "---END FILE---",
       generationSuffix,
     ].join("\n"))
@@ -156,6 +188,7 @@ describe("autoIngest source summary paths", () => {
     sourceMarkers = []
     failLongChunksOnce = new Set()
     extraReviewResponse = ""
+    generationBodySuffix = ""
     generationSuffix = ""
     truncatedRepairResponse = ""
     missingPageRepairResponse = ""
@@ -163,6 +196,13 @@ describe("autoIngest source summary paths", () => {
     abortDuringReview = null
     interactiveGenerationOverride = ""
     mergeRequestCount = 0
+    generationBatchRequests = []
+    generationBatchResponder = null
+    longSourceDigestLinks = []
+    longSourceFinalPlan = [
+      "## Generation Contract",
+      "NO_STANDALONE_PAGES: the test fixture contains repeated placeholder text only.",
+    ].join("\n")
     mockStreamChat.mockClear()
     mockParseWithMineru.mockReset()
     tmp = await createTempProject("same-basename-sources")
@@ -500,10 +540,10 @@ describe("autoIngest source summary paths", () => {
     )
 
     const generationCall = mockStreamChat.mock.calls.find(([, messages]) =>
-      String(messages?.[0]?.content ?? "").includes("Based on the analysis provided, generate wiki files"),
+      String(messages?.[0]?.content ?? "").includes("Based on the analysis below, generate the requested bounded batch"),
     )
     expect(generationCall).toBeTruthy()
-    const generationPrompt = String(generationCall?.[1]?.[1]?.content ?? "")
+    const generationPrompt = String(generationCall?.[1]?.[0]?.content ?? "")
     expect(generationPrompt).toContain("Long Source Context")
     expect(generationPrompt).toContain(
       `Digest after chunk ${chunkCalls.length}: stable context ${chunkCalls.length}.`,
@@ -517,6 +557,102 @@ describe("autoIngest source summary paths", () => {
     expect(finalDigestSection).not.toContain(
       `Chunk ${chunkCalls.length} introduced topic ${chunkCalls.length}.`,
     )
+  })
+
+  it("turns a legacy long-document outline into pages and source links", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    sourceMarkers = ["legacy textbook outline"]
+    longSourceDigestLinks = [
+      "### Entities",
+      "- [[entities/邓小平]] — central historical figure",
+      "### Concepts",
+      "- [[concepts/改革开放]] — central policy",
+      "- [[concepts/经济特区]] — implementation mechanism",
+    ]
+    const longSourcePath = `${tmp.path}/raw/sources/project-a/legacy-outline.md`
+    await writeFileRaw(
+      longSourcePath,
+      [
+        "# Chapter One",
+        "A".repeat(9_000),
+        "# Chapter Two",
+        "B".repeat(9_000),
+        "# Chapter Three",
+        "C".repeat(9_000),
+      ].join("\n\n"),
+    )
+
+    generationBatchResponder = (paths) => ({
+      output: paths.map((requestedPath) => {
+        const isSource = requestedPath.startsWith("wiki/sources/")
+        const pageName = path.basename(requestedPath, ".md")
+        return [
+          `---FILE: ${requestedPath}---`,
+          "---",
+          `type: ${isSource ? "source" : requestedPath.includes("/entities/") ? "entity" : "concept"}`,
+          `title: "${pageName}"`,
+          'sources: ["project-a/legacy-outline.md"]',
+          "tags: []",
+          "related: []",
+          "---",
+          "",
+          `# ${pageName}`,
+          "",
+          "Complete source-backed content without hand-written wikilinks.",
+          "---END FILE---",
+        ].join("\n")
+      }).join("\n\n"),
+    })
+
+    const written = await autoIngest(
+      tmp.path,
+      longSourcePath,
+      { ...useWikiStore.getState().llmConfig, maxContextSize: 20_000 },
+      undefined,
+      "project-a",
+    )
+
+    expect(written).toEqual(expect.arrayContaining([
+      "wiki/entities/邓小平.md",
+      "wiki/concepts/改革开放.md",
+      "wiki/concepts/经济特区.md",
+    ]))
+    const sourceSummaryPath = path.join(
+      tmp.path,
+      "wiki",
+      "sources",
+      `${sourceSummarySlugFromIdentity("project-a/legacy-outline.md")}.md`,
+    )
+    const sourceSummary = await fs.readFile(sourceSummaryPath, "utf8")
+    expect(sourceSummary).toContain("[[entities/邓小平|邓小平]]")
+    expect(sourceSummary).toContain("[[concepts/改革开放|改革开放]]")
+    expect(sourceSummary).toContain("[[concepts/经济特区|经济特区]]")
+  })
+
+  it("does not report a long document complete when the knowledge plan is empty", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    longSourceFinalPlan = ""
+    const longSourcePath = `${tmp.path}/raw/sources/project-a/empty-plan.md`
+    await writeFileRaw(
+      longSourcePath,
+      ["# One", "A".repeat(9_000), "# Two", "B".repeat(9_000), "# Three", "C".repeat(9_000)].join("\n\n"),
+    )
+
+    await expect(autoIngest(
+      tmp.path,
+      longSourcePath,
+      { ...useWikiStore.getState().llmConfig, maxContextSize: 20_000 },
+      undefined,
+      "project-a",
+    )).rejects.toThrow("Long-document knowledge plan could not be finalized")
+
+    const summaryPath = path.join(
+      tmp.path,
+      "wiki",
+      "sources",
+      `${sourceSummarySlugFromIdentity("project-a/empty-plan.md")}.md`,
+    )
+    await expect(fs.access(summaryPath)).rejects.toThrow()
   })
 
   it("resumes oversized source analysis from the persisted chunk checkpoint", async () => {
@@ -569,18 +705,7 @@ describe("autoIngest source summary paths", () => {
   it("adds follow-up research reviews from the dedicated review stage", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["project-a config"]
-    generationSuffix = [
-      "",
-      "---FILE: wiki/concepts/nitrification-inhibition.md---",
-      "---",
-      'title: "Nitrification inhibition"',
-      "---",
-      "",
-      "# Nitrification inhibition",
-      "",
-      "X".repeat(10_500),
-      "---END FILE---",
-    ].join("\n")
+    generationBodySuffix = "X".repeat(10_500)
     extraReviewResponse = [
       "---REVIEW: suggestion | Research nitrification inhibition signals---",
       "Add follow-up research on early-warning indicators for nitrification inhibition.",
@@ -613,6 +738,7 @@ describe("autoIngest source summary paths", () => {
   it("parses generation and dedicated review-stage blocks separately", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["project-a config"]
+    generationBodySuffix = "X".repeat(10_500)
     generationSuffix = [
       "",
       "---REVIEW: missing-page | Truncated Orphan---",
@@ -643,9 +769,13 @@ describe("autoIngest source summary paths", () => {
     expect(reviews[0].description).not.toContain("Truncated Orphan")
   })
 
-  it("retries a truncated FILE block with a targeted generation request", async () => {
+  it("repairs a requested FILE block that was truncated during its generation batch", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["project-a config"]
+    analysisOverride = [
+      "## Generation Contract",
+      "- [[concepts/recovered]] — required concept from the source.",
+    ].join("\n")
     generationSuffix = [
       "",
       "---FILE: wiki/concepts/recovered.md---",
@@ -658,7 +788,7 @@ describe("autoIngest source summary paths", () => {
       "",
       "This response was cut off",
     ].join("\n")
-    truncatedRepairResponse = [
+    missingPageRepairResponse = [
       "---FILE: wiki/concepts/recovered.md---",
       "---",
       'title: "Recovered concept"',
@@ -694,7 +824,7 @@ describe("autoIngest source summary paths", () => {
     expect(
       mockStreamChat.mock.calls.some(([, messages]) =>
         String(messages[0]?.content ?? "").startsWith(
-          "You are repairing truncated wiki FILE blocks",
+          "You are completing wiki pages",
         ),
       ),
     ).toBe(true)
@@ -704,7 +834,7 @@ describe("autoIngest source summary paths", () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["project-a config"]
     analysisOverride = [
-      "## Key Concepts",
+      "## Generation Contract",
       "- [[concepts/missing-concept]] — important concept from the source.",
     ].join("\n")
     missingPageRepairResponse = [
@@ -746,7 +876,7 @@ describe("autoIngest source summary paths", () => {
   it("fails visibly when expected analysis pages remain missing after bounded repair", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["project-a config"]
-    analysisOverride = "## Key Concepts\n- [[concepts/still-missing]] — required."
+    analysisOverride = "## Generation Contract\n- [[concepts/still-missing]] — required."
     missingPageRepairResponse = ""
 
     await expect(
@@ -769,10 +899,184 @@ describe("autoIngest source summary paths", () => {
     ).toHaveLength(2)
   })
 
+  it("resumes wiki generation from saved complete blocks instead of regenerating successful batches", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    const conceptPaths = Array.from({ length: 7 }, (_, index) => `wiki/concepts/topic-${index + 1}.md`)
+    analysisOverride = [
+      "## Generation Contract",
+      ...conceptPaths.map((path) => `- [[${path.replace(/^wiki\//, "").replace(/\.md$/, "")}]] — required topic.`),
+    ].join("\n")
+
+    const renderBlocks = (paths: string[]) => paths.map((requestedPath) => [
+      `---FILE: ${requestedPath}---`,
+      "---",
+      'type: "concept"',
+      `title: "${path.basename(requestedPath, ".md")}"`,
+      'sources: ["project-a/config.yaml"]',
+      "tags: []",
+      "related: []",
+      "---",
+      "",
+      `# ${path.basename(requestedPath, ".md")}`,
+      "",
+      `Complete evidence for ${requestedPath}.`,
+      "---END FILE---",
+    ].join("\n")).join("\n\n")
+
+    generationBatchResponder = (paths, requestIndex) => requestIndex === 0
+      ? { output: renderBlocks(paths) }
+      : { error: "simulated connection loss" }
+
+    await expect(autoIngest(
+      tmp.path,
+      `${tmp.path}/raw/sources/project-a/config.yaml`,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+    )).rejects.toThrow(/expected page\(s\) missing/)
+
+    const completedFirstBatch = [...generationBatchRequests[0]]
+    expect(completedFirstBatch).toHaveLength(6)
+
+    generationBatchRequests = []
+    generationBatchResponder = (paths) => ({ output: renderBlocks(paths) })
+
+    const written = await autoIngest(
+      tmp.path,
+      `${tmp.path}/raw/sources/project-a/config.yaml`,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+    )
+
+    expect(generationBatchRequests).toEqual([conceptPaths.slice(5)])
+    expect(written).toEqual(expect.arrayContaining(conceptPaths))
+    expect(generationBatchRequests[0]).not.toEqual(expect.arrayContaining(completedFirstBatch))
+
+    const diagnosticPath = path.join(
+      tmp.path,
+      ".llm-wiki",
+      "ingest-diagnostics",
+      `${sourceSummarySlugFromIdentity("project-a/config.yaml")}.json`,
+    )
+    const diagnostic = JSON.parse(await fs.readFile(diagnosticPath, "utf8")) as {
+      resumedKnowledgePages: number
+      modelCalls: { analysis: number; generation: number; repair: number; review: number; merge: number }
+    }
+    expect(diagnostic.resumedKnowledgePages).toBe(6)
+    expect(diagnostic.modelCalls.analysis).toBe(0)
+    expect(diagnostic.modelCalls.generation).toBe(1)
+    expect(diagnostic.modelCalls.repair).toBe(0)
+    expect(diagnostic.modelCalls.merge).toBe(0)
+  })
+
+  it("does not repeat a completed page merge after a later cancellation", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    sourceMarkers = ["project-a config"]
+    const sourceIdentity = "project-a/config.yaml"
+    const summarySlug = sourceSummarySlugFromIdentity(sourceIdentity)
+    const summaryPath = path.join(tmp.path, "wiki", "sources", `${summarySlug}.md`)
+    await fs.mkdir(path.dirname(summaryPath), { recursive: true })
+    await fs.writeFile(summaryPath, [
+      "---",
+      'title: "Existing shared source page"',
+      'sources: ["other/source.md"]',
+      "---",
+      "",
+      "# Existing shared source page",
+      "",
+      "Content that must survive the merge.",
+    ].join("\n"), "utf8")
+
+    const controller = new AbortController()
+    await expect(autoIngest(
+      tmp.path,
+      `${tmp.path}/raw/sources/project-a/config.yaml`,
+      useWikiStore.getState().llmConfig,
+      controller.signal,
+      "project-a",
+      () => controller.abort(),
+    )).rejects.toThrow(/cancelled/i)
+    expect(mergeRequestCount).toBe(1)
+
+    const written = await autoIngest(
+      tmp.path,
+      `${tmp.path}/raw/sources/project-a/config.yaml`,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+    )
+
+    expect(written).toContain(`wiki/sources/${summarySlug}.md`)
+    expect(mergeRequestCount).toBe(1)
+    const diagnostic = JSON.parse(await fs.readFile(
+      path.join(tmp.path, ".llm-wiki", "ingest-diagnostics", `${summarySlug}.json`),
+      "utf8",
+    )) as { resumedWrittenPages: number; modelCalls: { merge: number } }
+    expect(diagnostic.resumedWrittenPages).toBe(1)
+    expect(diagnostic.modelCalls.merge).toBe(0)
+  })
+
+  it("resumes a large 61-page plan by requesting only the failed batch", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    const conceptPaths = Array.from({ length: 61 }, (_, index) => `wiki/concepts/large-topic-${index + 1}.md`)
+    analysisOverride = [
+      "## Generation Contract",
+      ...conceptPaths.map((requestedPath) => `- [[${requestedPath.replace(/^wiki\//, "").replace(/\.md$/, "")}]]`),
+    ].join("\n")
+    const renderBlocks = (paths: string[]) => paths.map((requestedPath) => [
+      `---FILE: ${requestedPath}---`,
+      "---",
+      `title: "${path.basename(requestedPath, ".md")}"`,
+      'sources: ["project-a/config.yaml"]',
+      "---",
+      "",
+      `# ${path.basename(requestedPath, ".md")}`,
+      "",
+      `Complete evidence for ${requestedPath}.`,
+      "---END FILE---",
+    ].join("\n")).join("\n\n")
+    let failTargetBatch = true
+    generationBatchResponder = (paths) => (
+      failTargetBatch && paths.includes("wiki/concepts/large-topic-24.md")
+        ? { error: "simulated one-batch outage" }
+        : { output: renderBlocks(paths) }
+    )
+
+    await expect(autoIngest(
+      tmp.path,
+      `${tmp.path}/raw/sources/project-a/config.yaml`,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+    )).rejects.toThrow(/expected page\(s\) missing/)
+
+    failTargetBatch = false
+    generationBatchRequests = []
+    const written = await autoIngest(
+      tmp.path,
+      `${tmp.path}/raw/sources/project-a/config.yaml`,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+    )
+
+    expect(generationBatchRequests).toHaveLength(1)
+    expect(generationBatchRequests[0]).toEqual([
+      "wiki/concepts/large-topic-24.md",
+      "wiki/concepts/large-topic-25.md",
+      "wiki/concepts/large-topic-26.md",
+      "wiki/concepts/large-topic-27.md",
+      "wiki/concepts/large-topic-28.md",
+      "wiki/concepts/large-topic-29.md",
+    ])
+    expect(written).toEqual(expect.arrayContaining(conceptPaths))
+  })
+
   it("propagates cancellation that happens during the dedicated review stage", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["project-a config"]
-    generationSuffix = `${"\n"}${"X".repeat(10_500)}`
+    generationBodySuffix = "X".repeat(10_500)
     const controller = new AbortController()
     abortDuringReview = controller
 
@@ -845,6 +1149,33 @@ describe("autoIngest source summary paths", () => {
     )
 
     expect(mockParseWithMineru).toHaveBeenCalled()
+  })
+
+  it("reuses the verified MinerU stage when only the ingest model changes", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    const sourcePath = `${tmp.path}/raw/sources/project-a/stage-cache.pdf`
+    await writeFileRaw(sourcePath, "pdf fallback text\n")
+    sourceMarkers = ["first model", "second model"]
+    useWikiStore.setState({
+      mineruConfig: {
+        enabled: true,
+        backend: "local",
+        token: "",
+        modelVersion: "vlm",
+      },
+    })
+    mockParseWithMineru.mockResolvedValueOnce({
+      markdown: "verified MinerU markdown",
+      savedImages: [],
+      processedPageCount: null,
+    })
+
+    const firstConfig = { ...useWikiStore.getState().llmConfig, model: "ingest-model-a" }
+    await autoIngest(tmp.path, sourcePath, firstConfig, undefined, "project-a")
+    const secondConfig = { ...firstConfig, model: "ingest-model-b" }
+    await autoIngest(tmp.path, sourcePath, secondConfig, undefined, "project-a")
+
+    expect(mockParseWithMineru).toHaveBeenCalledTimes(1)
   })
 
   it("does not fall back to built-in PDF extraction when MinerU is cancelled", async () => {

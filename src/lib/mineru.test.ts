@@ -197,6 +197,10 @@ describe("MinerU API helpers", () => {
     mockHttpFetch.mockResolvedValueOnce(await zipResponse({
       "full.md": "![Chart](images/chart.png)",
       "images/chart.png": "chart-bytes",
+      "paper_content_list.json": JSON.stringify([
+        { page_idx: 0, text: "first" },
+        { page_idx: 2, text: "third" },
+      ]),
     }))
 
     const result = await __mineruTest.downloadAndExtractMarkdownResult(
@@ -217,6 +221,7 @@ describe("MinerU API helpers", () => {
       absPath: "/project/wiki/media/paper/mineru/images/chart.png",
     })
     expect(result.savedImages[0].sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(result.processedPageCount).toBe(3)
   })
 
   it("rewrites Markdown image paths containing spaces", async () => {

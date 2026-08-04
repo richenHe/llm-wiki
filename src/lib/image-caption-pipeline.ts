@@ -34,7 +34,7 @@
  * restarts — no migration story needed when the embedding-side
  * schema changes. If we ever cache 100k+ images we'll revisit.
  */
-import { writeFile, readFile, createDirectory, fileExists, readFileAsBase64 } from "@/commands/fs"
+import { writeFileAtomic, readFile, createDirectory, fileExists, readFileAsBase64 } from "@/commands/fs"
 import { captionImage } from "@/lib/vision-caption"
 import type { LlmConfig } from "@/stores/wiki-store"
 import { normalizePath } from "@/lib/path-utils"
@@ -49,6 +49,21 @@ interface CaptionEntry {
 type CaptionCache = Record<string, CaptionEntry>
 
 const CACHE_REL_PATH = ".llm-wiki/image-caption-cache.json"
+
+function isTransientCaptionError(message: string): boolean {
+  return /\b(?:429|502|503|504)\b|service\s+(?:is\s+)?too\s+busy|service[_\s-]*unavailable|timeout|timed\s*out|connection\s+(?:reset|closed)|network\s+error|fetch\s+failed/i.test(message)
+}
+
+function waitForCaptionRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException("Captioning aborted", "AbortError"))
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, delayMs)
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer)
+      reject(new DOMException("Captioning aborted", "AbortError"))
+    }, { once: true })
+  })
+}
 
 /**
  * Compute SHA-256 of a base64 string by decoding to bytes first
@@ -118,7 +133,7 @@ async function writeCache(projectPath: string, cache: CaptionCache): Promise<voi
   // Pretty-print at 2 spaces. Cache files end up in user backups
   // and source control sometimes; readability outweighs the small
   // size penalty.
-  await writeFile(cachePath, JSON.stringify(cache, null, 2))
+  await writeFileAtomic(cachePath, JSON.stringify(cache, null, 2))
 }
 
 /**
@@ -278,6 +293,8 @@ export interface CaptionPipelineResult {
   cachedCaptions: number
   /** Number of images we tried to caption but failed (logged). */
   failed: number
+  /** Exact image reference and error for every failed caption attempt. */
+  failures: Array<{ url: string; message: string }>
 }
 
 export async function captionMarkdownImages(
@@ -293,6 +310,7 @@ export async function captionMarkdownImages(
       freshCaptions: 0,
       cachedCaptions: 0,
       failed: 0,
+      failures: [],
     }
   }
 
@@ -304,6 +322,7 @@ export async function captionMarkdownImages(
       freshCaptions: 0,
       cachedCaptions: 0,
       failed: 0,
+      failures: [],
     }
   }
 
@@ -316,6 +335,10 @@ export async function captionMarkdownImages(
       freshCaptions: 0,
       cachedCaptions: 0,
       failed: targetRefs.length,
+      failures: targetRefs.map((ref) => ({
+        url: ref.url,
+        message: "The selected Codex CLI transport cannot send image input.",
+      })),
     }
   }
 
@@ -323,7 +346,15 @@ export async function captionMarkdownImages(
   let freshCaptions = 0
   let cachedCaptions = 0
   let failed = 0
+  const failures: Array<{ url: string; message: string }> = []
   const captionByUrl = new Map<string, string>()
+  let cacheWriteTail = Promise.resolve()
+  let cachePersistenceFailed = false
+
+  const persistCaptionProgress = async (): Promise<void> => {
+    cacheWriteTail = cacheWriteTail.catch(() => undefined).then(() => writeCache(projectPath, cache))
+    await cacheWriteTail
+  }
 
   // De-dupe target refs by URL up front. Two refs to the same URL
   // (inline + safety-net section) should share one caption call —
@@ -366,6 +397,7 @@ export async function captionMarkdownImages(
         : `${normalizePath(projectPath)}/wiki/${ref.url}`
     if (!absPath) {
       failed++
+      failures.push({ url: ref.url, message: "The image path could not be resolved." })
       return
     }
 
@@ -378,6 +410,10 @@ export async function captionMarkdownImages(
         err instanceof Error ? err.message : err,
       )
       failed++
+      failures.push({
+        url: ref.url,
+        message: err instanceof Error ? err.message : String(err),
+      })
       return
     }
 
@@ -396,13 +432,24 @@ export async function captionMarkdownImages(
     const { before, after } = sliceContext(markdown, ref, CONTEXT_CHARS)
 
     try {
-      const caption = await captionImage(
-        bytes.base64,
-        bytes.mimeType,
-        llmConfig,
-        options?.signal,
-        { contextBefore: before, contextAfter: after },
-      )
+      let caption = ""
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          caption = await captionImage(
+            bytes.base64,
+            bytes.mimeType,
+            llmConfig,
+            options?.signal,
+            { contextBefore: before, contextAfter: after },
+          )
+          break
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          if (attempt >= 3 || !isTransientCaptionError(message)) throw err
+          await waitForCaptionRetry(attempt === 1 ? 1_000 : 3_000, options?.signal)
+        }
+      }
+      if (!caption.trim()) throw new Error("Vision model returned an empty image description")
       cache[hash] = {
         caption,
         mimeType: bytes.mimeType,
@@ -411,12 +458,28 @@ export async function captionMarkdownImages(
       }
       captionByUrl.set(ref.url, caption)
       freshCaptions++
+      // Save each successful caption before moving on. Vision calls are slow;
+      // losing dozens of finished captions to a later cancellation costs much
+      // more than one small atomic JSON write per image.
+      try {
+        await persistCaptionProgress()
+      } catch (err) {
+        cachePersistenceFailed = true
+        console.warn(
+          `[caption-pipeline] failed to persist completed caption for ${absPath}:`,
+          err instanceof Error ? err.message : err,
+        )
+      }
     } catch (err) {
       console.warn(
         `[caption-pipeline] caption failed for ${absPath}:`,
         err instanceof Error ? err.message : err,
       )
       failed++
+      failures.push({
+        url: ref.url,
+        message: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 
@@ -438,11 +501,8 @@ export async function captionMarkdownImages(
     Array.from({ length: Math.min(concurrency, uniqueRefs.length) }, () => worker()),
   )
 
-  // Persist the (possibly grown) cache. Per-image atomic writes
-  // would survive crashes mid-batch but every-image-disk-write
-  // adds N file syncs to a captioning loop that's already slow;
-  // one write at the end is the right trade.
-  if (freshCaptions > 0) {
+  // Retry once at the end only if an immediate checkpoint write failed.
+  if (freshCaptions > 0 && cachePersistenceFailed) {
     try {
       await writeCache(projectPath, cache)
     } catch (err) {
@@ -471,7 +531,8 @@ export async function captionMarkdownImages(
     },
   )
 
-  return { enrichedMarkdown, freshCaptions, cachedCaptions, failed }
+  failures.sort((a, b) => a.url.localeCompare(b.url))
+  return { enrichedMarkdown, freshCaptions, cachedCaptions, failed, failures }
 }
 
 // Exported for direct unit testing — keeps the module surface small

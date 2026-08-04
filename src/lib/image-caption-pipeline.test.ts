@@ -22,6 +22,7 @@ vi.mock("@/lib/vision-caption", () => ({
 vi.mock("@/commands/fs", () => ({
   readFile: (p: string) => mockReadFile(p),
   writeFile: (p: string, c: string) => mockWriteFile(p, c),
+  writeFileAtomic: (p: string, c: string) => mockWriteFile(p, c),
   fileExists: (p: string) => mockFileExists(p),
   createDirectory: (p: string) => mockCreateDir(p),
   readFileAsBase64: (p: string) => mockReadBase64(p),
@@ -188,9 +189,26 @@ describe("captionMarkdownImages", () => {
 
     expect(out.freshCaptions).toBe(1)
     expect(out.failed).toBe(1)
+    expect(out.failures).toEqual([{
+      url: "/abs/b.png",
+      message: "HTTP 500",
+    }])
     // Successful one rewritten, failing one keeps original empty alt.
     expect(out.enrichedMarkdown).toBe("![first](/abs/a.png) ![](/abs/b.png)")
   })
+
+  it("retries a temporarily busy vision endpoint inside the same image", async () => {
+    mockReadBase64.mockResolvedValue({ base64: "AAAA", mimeType: "image/png" })
+    mockCaption
+      .mockRejectedValueOnce(new Error("HTTP 503: Service is too busy"))
+      .mockResolvedValueOnce("recovered caption")
+
+    const out = await captionMarkdownImages("/proj", "![](/abs/a.png)", cfg)
+
+    expect(mockCaption).toHaveBeenCalledTimes(2)
+    expect(out.failed).toBe(0)
+    expect(out.enrichedMarkdown).toBe("![recovered caption](/abs/a.png)")
+  }, 7_000)
 
   it("respects shouldCaption filter: skips URLs that don't match", async () => {
     mockReadBase64.mockResolvedValue({ base64: "AAAA", mimeType: "image/png" })
@@ -291,6 +309,7 @@ describe("captionMarkdownImages", () => {
     const out = await captionMarkdownImages("/proj", md, cfg, { concurrency: 3 })
 
     expect(out.freshCaptions).toBe(3)
+    expect(mockWriteFile).toHaveBeenCalledTimes(3)
     // With concurrency=3 and ALL three workers spawned before any
     // resolve, the peak should reach 3. We assert >=2 to leave
     // some slack for tight scheduler races but still detect

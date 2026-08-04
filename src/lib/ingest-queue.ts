@@ -4,6 +4,7 @@ import { normalizePath, isAbsolutePath } from "@/lib/path-utils"
 import { getProjectPathById } from "@/lib/project-identity"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
+import { isIngestNeedsAttentionError } from "@/lib/ingest-errors"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -584,6 +585,8 @@ export async function restoreQueue(
   for (const task of mine) {
     if (task.status === "processing") {
       task.status = "pending"
+      task.error = null
+      task.retryCount = 0
       restored++
     }
   }
@@ -799,6 +802,16 @@ async function processNext(projectId: string): Promise<void> {
       return
     }
     const message = err instanceof Error ? err.message : String(err)
+    if (isIngestNeedsAttentionError(err)) {
+      next.retryCount++
+      next.status = "failed"
+      next.error = message
+      processing = false
+      await saveQueue(pp)
+      console.log(`[Ingest Queue] Needs targeted repair; whole-source retry suppressed: ${next.sourcePath} — ${message}`)
+      processNext(projectId)
+      return
+    }
     if (isProviderUnavailableError(message)) {
       next.status = "pending"
       next.error = `Paused because the provider is unavailable: ${message}`
