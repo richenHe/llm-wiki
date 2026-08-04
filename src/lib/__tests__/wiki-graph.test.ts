@@ -27,6 +27,10 @@ function mdFile(name: string): FileNode {
   return { name, path: `/project/wiki/${name}`, is_dir: false }
 }
 
+function mdFileAt(directory: string, name: string): FileNode {
+  return { name, path: `/project/wiki/${directory}/${name}`, is_dir: false }
+}
+
 describe("buildWikiGraph frontmatter extraction", () => {
   it("does not read a title: line from the document body as the frontmatter title", async () => {
     const buildWikiGraph = await loadBuildWikiGraph()
@@ -79,5 +83,40 @@ describe("buildWikiGraph frontmatter extraction", () => {
 
     expect(graph.nodes).toHaveLength(1)
     expect(graph.nodes[0]).toMatchObject({ label: "Attention: Architecture", type: "concept" })
+  })
+
+  it("preserves arbitrary markdown heading depth for progressive learning", async () => {
+    const buildWikiGraph = await loadBuildWikiGraph()
+    mockListDirectory.mockResolvedValue([mdFile("contract.md")])
+    mockReadFile.mockResolvedValue(
+      "# 合同法\n\n## 合同成立\n\n当事人的意思表示需要一致。\n\n### 承诺\n\n受要约人同意要约。\n\n#### 到达规则\n\n承诺到达要约人时生效。\n",
+    )
+
+    const graph = await buildWikiGraph("/project")
+
+    expect(graph.nodes[0].outline?.map((item) => [item.title, item.parentId])).toEqual([
+      ["合同成立", null],
+      ["承诺", "contract::heading:0"],
+      ["到达规则", "contract::heading:1"],
+    ])
+  })
+
+  it("keeps same-named pages in different wiki directories", async () => {
+    const buildWikiGraph = await loadBuildWikiGraph()
+    mockListDirectory.mockResolvedValue([
+      { name: "concepts", path: "/project/wiki/concepts", is_dir: true, children: [mdFileAt("concepts", "index.md")] },
+      { name: "entities", path: "/project/wiki/entities", is_dir: true, children: [mdFileAt("entities", "index.md")] },
+      mdFile("overview.md"),
+    ])
+    mockReadFile.mockImplementation(async (path: string) => {
+      if (path.includes("concepts")) return "---\ntitle: 概念索引\ntype: concept\n---\n# 概念索引\n\n概念索引的详细说明。"
+      if (path.includes("entities")) return "---\ntitle: 实体索引\ntype: entity\n---\n# 实体索引\n\n实体索引的详细说明。"
+      return "# 总览\n\n关联到 [[concepts/index]]。"
+    })
+
+    const graph = await buildWikiGraph("/project")
+
+    expect(graph.nodes.map((node) => node.id).sort()).toEqual(["concepts/index", "entities/index", "overview"])
+    expect(graph.edges).toContainEqual(expect.objectContaining({ source: "overview", target: "concepts/index" }))
   })
 })

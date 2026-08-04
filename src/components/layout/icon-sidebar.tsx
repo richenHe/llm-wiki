@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react"
 import {
-  FileText, FolderOpen, Search, Network, ClipboardCheck, Settings, ArrowLeftRight, ClipboardList, Globe, MessageSquare, Sparkles,
+  FileText, FolderOpen, Search, Network, ClipboardCheck, Settings, ArrowLeftRight, ClipboardList, Globe, MessageSquare, Sparkles, GraduationCap,
 } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -17,12 +17,13 @@ import {
 
 type NavView = WikiState["activeView"]
 
-const NAV_ITEMS: { view: NavView; icon: typeof FileText; labelKey: string }[] = [
+const NAV_ITEMS: { view: NavView; icon: typeof FileText; labelKey?: string; label?: string }[] = [
   { view: "chat", icon: MessageSquare, labelKey: "nav.chat" },
   { view: "wiki", icon: FileText, labelKey: "nav.wiki" },
   { view: "sources", icon: FolderOpen, labelKey: "nav.sources" },
   { view: "search", icon: Search, labelKey: "nav.search" },
   { view: "graph", icon: Network, labelKey: "nav.graph" },
+  { view: "learn", icon: GraduationCap, label: "学习地图" },
   { view: "lint", icon: ClipboardCheck, labelKey: "nav.lint" },
   { view: "review", icon: ClipboardList, labelKey: "nav.review" },
 ]
@@ -84,7 +85,7 @@ export function IconSidebar({ onSwitchProject }: IconSidebarProps) {
         </div>
         {/* Top: main nav items + Deep Research */}
         <div className="flex flex-1 flex-col items-center gap-1">
-          {NAV_ITEMS.map(({ view, icon: Icon, labelKey }) => (
+          {NAV_ITEMS.map(({ view, icon: Icon, labelKey, label }) => (
             <Tooltip key={view}>
               <TooltipTrigger
                 onClick={() => setActiveView(view)}
@@ -102,7 +103,7 @@ export function IconSidebar({ onSwitchProject }: IconSidebarProps) {
                 )}
               </TooltipTrigger>
               <TooltipContent side="right">
-                {t(labelKey)}
+                {label ?? t(labelKey!)}
                 {view === "review" && pendingCount > 0 && ` (${pendingCount})`}
               </TooltipContent>
             </Tooltip>

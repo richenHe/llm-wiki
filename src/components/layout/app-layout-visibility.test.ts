@@ -25,6 +25,13 @@ describe("getAppLayoutVisibility", () => {
     })
   })
 
+  it("gives the learning atlas the full workspace", () => {
+    expect(getAppLayoutVisibility("learn", true)).toEqual({
+      showLeftPanel: false,
+      hasRightPanel: false,
+    })
+  })
+
   it("shows the project side panel and optional research panel in workspace views", () => {
     expect(getAppLayoutVisibility("wiki", false)).toEqual({
       showLeftPanel: true,

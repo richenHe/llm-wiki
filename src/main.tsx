@@ -4,6 +4,8 @@ import App from "./App";
 import "./index.css";
 import "@/i18n";
 import { loadAndApplyTheme, watchSystemTheme } from "@/lib/theme";
+import { useWikiStore } from "@/stores/wiki-store";
+import { LearningPreview } from "@/features/learning/learning-preview";
 
 function applyPlatformClass() {
   const isTauri = "__TAURI_INTERNALS__" in window || "__TAURI__" in window;
@@ -16,6 +18,19 @@ function applyPlatformClass() {
 async function initApp() {
   try {
     applyPlatformClass();
+    const previewId = new URLSearchParams(window.location.search).get("learning-preview");
+    const localPreviewHost = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
+    if ((import.meta.env.DEV || localPreviewHost) && previewId !== null) {
+      const previewSuffix = previewId.trim() || "default";
+      useWikiStore.setState({
+        project: { id: `learning-preview-${previewSuffix}`, name: "高中物理", path: `C:/llm-wiki-preview-${previewSuffix}` },
+        activeView: "learn",
+      });
+      ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+        <React.StrictMode><LearningPreview /></React.StrictMode>
+      );
+      return;
+    }
     await loadAndApplyTheme();
     watchSystemTheme();
 

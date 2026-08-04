@@ -13,6 +13,16 @@ export interface GraphNode {
   path: string
   linkCount: number // inbound + outbound
   community: number // community id from Louvain detection
+  summary?: string
+  outline?: GraphOutlineNode[]
+}
+
+export interface GraphOutlineNode {
+  id: string
+  title: string
+  level: number
+  parentId: string | null
+  summary: string
 }
 
 export interface GraphEdge {
@@ -143,6 +153,42 @@ function extractType(content: string): string {
   return "other"
 }
 
+function extractSummary(content: string, title: string): string {
+  const body = content
+    .replace(/^---[\s\S]*?---\s*/m, "")
+    .replace(/^#{1,6}\s+.+$/gm, "")
+    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_match, target: string, label?: string) => label ?? target)
+    .split(/\n\s*\n/)
+    .map((paragraph) => paragraph.replace(/\s+/g, " ").trim())
+    .find((paragraph) => paragraph.length >= 12)
+  return body?.slice(0, 140) ?? `理解“${title}”在当前知识体系中的含义与联系。`
+}
+
+function extractOutline(content: string, pageId: string): GraphOutlineNode[] {
+  const body = content.replace(/^---[\s\S]*?---\s*/m, "")
+  const headings = [...body.matchAll(/^(#{2,6})\s+(.+)$/gm)]
+  const result: GraphOutlineNode[] = []
+  const stack: GraphOutlineNode[] = []
+  headings.forEach((match, index) => {
+    const level = match[1].length
+    const title = match[2].replace(/\s+#+\s*$/, "").trim()
+    const id = `${pageId}::heading:${index}`
+    while (stack.length > 0 && stack[stack.length - 1].level >= level) stack.pop()
+    const sectionStart = (match.index ?? 0) + match[0].length
+    const sectionEnd = headings[index + 1]?.index ?? body.length
+    const node: GraphOutlineNode = {
+      id,
+      title,
+      level,
+      parentId: stack[stack.length - 1]?.id ?? null,
+      summary: extractSummary(body.slice(sectionStart, sectionEnd), title),
+    }
+    result.push(node)
+    stack.push(node)
+  })
+  return result
+}
+
 function extractWikilinks(content: string): string[] {
   const links: string[] = []
   const regex = new RegExp(WIKILINK_REGEX.source, "g")
@@ -153,8 +199,13 @@ function extractWikilinks(content: string): string[] {
   return links
 }
 
-function fileNameToId(fileName: string): string {
-  return fileName.replace(/\.md$/, "")
+function filePathToId(filePath: string, wikiRoot: string): string {
+  const normalizedPath = normalizePath(filePath)
+  const normalizedRoot = normalizePath(wikiRoot).replace(/\/+$/, "")
+  const relativePath = normalizedPath.toLowerCase().startsWith(`${normalizedRoot.toLowerCase()}/`)
+    ? normalizedPath.slice(normalizedRoot.length + 1)
+    : normalizedPath.split("/").pop() ?? normalizedPath
+  return relativePath.replace(/\.md$/i, "")
 }
 
 export async function buildWikiGraph(
@@ -177,11 +228,11 @@ export async function buildWikiGraph(
   // Build a map of id -> node data
   const nodeMap = new Map<
     string,
-    { id: string; label: string; type: string; path: string; links: string[] }
+    { id: string; label: string; type: string; path: string; links: string[]; summary: string; outline: GraphOutlineNode[] }
   >()
 
   for (const file of mdFiles) {
-    const id = fileNameToId(file.name)
+    const id = filePathToId(file.path, wikiRoot)
     let content = ""
     try {
       content = await readFile(file.path)
@@ -190,12 +241,15 @@ export async function buildWikiGraph(
       continue
     }
 
+    const label = extractTitle(content, file.name)
     nodeMap.set(id, {
       id,
-      label: extractTitle(content, file.name),
+      label,
       type: extractType(content),
       path: file.path,
       links: extractWikilinks(content),
+      summary: extractSummary(content, label),
+      outline: extractOutline(content, id),
     })
   }
 
@@ -220,7 +274,7 @@ export async function buildWikiGraph(
   for (const [sourceId, nodeData] of nodeMap) {
     for (const targetRaw of nodeData.links) {
       // Normalize target: try matching by id (case-insensitive, hyphen/space)
-      const targetId = resolveTarget(targetRaw, nodeMap)
+      const targetId = resolveTarget(targetRaw, sourceId, nodeMap)
       if (targetId === null) continue
       if (targetId === sourceId) continue
 
@@ -281,6 +335,8 @@ export async function buildWikiGraph(
     path: n.path,
     linkCount: linkCounts.get(n.id) ?? 0,
     community: assignments.get(n.id) ?? 0,
+    summary: n.summary,
+    outline: n.outline,
   }))
 
   return { nodes, edges, communities }
@@ -288,18 +344,32 @@ export async function buildWikiGraph(
 
 function resolveTarget(
   raw: string,
+  sourceId: string,
   nodeMap: Map<string, { id: string }>,
 ): string | null {
   // Direct match
   if (nodeMap.has(raw)) return raw
 
   // Normalize: lowercase, replace spaces with hyphens and vice versa
-  const normalized = raw.toLowerCase().replace(/\s+/g, "-")
+  const normalized = raw.toLowerCase().replace(/\\/g, "/").replace(/\.md$/i, "").replace(/\s+/g, "-")
   for (const id of nodeMap.keys()) {
-    if (id.toLowerCase() === normalized) return id
-    if (id.toLowerCase() === raw.toLowerCase()) return id
-    if (id.toLowerCase().replace(/\s+/g, "-") === normalized) return id
+    const normalizedId = id.toLowerCase().replace(/\s+/g, "-")
+    if (normalizedId === normalized) return id
   }
+
+  const sourceDirectory = sourceId.includes("/") ? sourceId.slice(0, sourceId.lastIndexOf("/")) : ""
+  if (sourceDirectory) {
+    const sibling = `${sourceDirectory}/${normalized}`
+    for (const id of nodeMap.keys()) {
+      if (id.toLowerCase().replace(/\s+/g, "-") === sibling) return id
+    }
+  }
+
+  const basenameMatches = [...nodeMap.keys()].filter((id) => {
+    const basename = id.slice(id.lastIndexOf("/") + 1).toLowerCase().replace(/\s+/g, "-")
+    return basename === normalized
+  })
+  if (basenameMatches.length === 1) return basenameMatches[0]
 
   return null
 }
