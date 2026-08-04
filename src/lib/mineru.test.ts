@@ -52,6 +52,7 @@ async function zipResponse(files: Record<string, string>): Promise<Response> {
 }
 
 beforeEach(() => {
+  vi.useRealTimers()
   mockHttpFetch.mockReset()
   directDownloadMocks.download.mockReset()
   fsMocks.createDirectory.mockReset()
@@ -584,7 +585,7 @@ describe("parseWithMineru", () => {
   })
 
   it("rejects batch upload responses without an upload URL", async () => {
-    mockHttpFetch.mockResolvedValueOnce(jsonResponse({
+    mockHttpFetch.mockImplementation(async () => jsonResponse({
       code: 0,
       msg: "ok",
       data: { batch_id: "batch-1", file_urls: [] },
@@ -595,6 +596,69 @@ describe("parseWithMineru", () => {
       token: "token",
       modelVersion: "vlm",
     }, "/tmp/doc.pdf")).rejects.toThrow("upload URL")
+    expect(mockHttpFetch).toHaveBeenCalledTimes(3)
+  })
+
+  it("requests a fresh upload address when the first file upload fails", async () => {
+    const progress: string[] = []
+    mockHttpFetch
+      .mockResolvedValueOnce(jsonResponse({
+        code: 0,
+        msg: "ok",
+        data: { batch_id: "batch-1", file_urls: ["https://upload-1"] },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 503 }))
+      .mockResolvedValueOnce(jsonResponse({
+        code: 0,
+        msg: "ok",
+        data: { batch_id: "batch-2", file_urls: ["https://upload-2"] },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse({
+        code: 0,
+        msg: "ok",
+        data: {
+          batch_id: "batch-2",
+          extract_result: [{ file_name: "doc.pdf", state: "done", full_zip_url: "https://zip" }],
+        },
+      }))
+      .mockResolvedValueOnce(await zipResponse({ "full.md": "parsed markdown" }))
+
+    await expect(parseWithMineru({
+      enabled: true,
+      token: "token",
+      modelVersion: "vlm",
+    }, "/tmp/doc.pdf", undefined, (message) => progress.push(message))).resolves.toBe("parsed markdown")
+
+    expect(mockHttpFetch.mock.calls.map(([url]) => url)).toEqual([
+      "https://mineru.net/api/v4/file-urls/batch",
+      "https://upload-1",
+      "https://mineru.net/api/v4/file-urls/batch",
+      "https://upload-2",
+      "https://mineru.net/api/v4/extract-results/batch/batch-2",
+      "https://zip",
+    ])
+    expect(progress).toContain("MinerU upload attempt 1/3 failed; retrying...")
+    expect(progress).toContain("Uploading 0.0 MB to MinerU (attempt 2/3)...")
+  })
+
+  it("aborts a MinerU request that never returns", async () => {
+    vi.useFakeTimers()
+    const hangingFetch = vi.fn(() => new Promise<Response>(() => undefined))
+
+    const request = __mineruTest.fetchWithTimeout(
+      hangingFetch as typeof globalThis.fetch,
+      "https://mineru.test/status",
+      {},
+      100,
+      "MinerU status request",
+    )
+    const timeoutExpectation = expect(request).rejects.toThrow("timed out after 1 seconds")
+    await vi.advanceTimersByTimeAsync(100)
+
+    await timeoutExpectation
+    expect(hangingFetch).toHaveBeenCalledOnce()
+    vi.useRealTimers()
   })
 
   it("uploads the decoded PDF bytes to the MinerU upload URL", async () => {

@@ -14,6 +14,11 @@ const LOCAL_POLL_TIMEOUT_MS = 3_600_000 // Official mineru-api tasks can include
 const MAX_ACCURATE_PARSE_BYTES = 200 * 1024 * 1024
 const ZIP_DOWNLOAD_ATTEMPTS = 2
 const ZIP_DOWNLOAD_RETRY_MS = 500
+const MINERU_API_REQUEST_TIMEOUT_MS = 30_000
+const MINERU_UPLOAD_MIN_TIMEOUT_MS = 120_000
+const MINERU_UPLOAD_MAX_TIMEOUT_MS = 600_000
+const MINERU_UPLOAD_MIN_BYTES_PER_SECOND = 128 * 1024
+const MINERU_UPLOAD_ATTEMPTS = 3
 const MINERU_IMAGE_EXTS = new Set([
   "png",
   "jpg",
@@ -468,6 +473,77 @@ function unresolvedLocalImageRefs(markdown: string): string[] {
   return [...refs]
 }
 
+async function fetchWithTimeout(
+  httpFetch: typeof globalThis.fetch,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  label: string,
+  signal?: AbortSignal,
+): Promise<Response> {
+  throwIfAborted(signal)
+  const controller = new AbortController()
+  let timedOut = false
+  let rejectGuard: ((error: Error) => void) | null = null
+  const guard = new Promise<never>((_resolve, reject) => {
+    rejectGuard = reject
+  })
+  const onAbort = () => {
+    controller.abort()
+    rejectGuard?.(new Error("MinerU parsing cancelled"))
+  }
+  signal?.addEventListener("abort", onAbort, { once: true })
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+    rejectGuard?.(new Error(`${label} timed out after ${Math.max(1, Math.ceil(timeoutMs / 1000))} seconds`))
+  }, timeoutMs)
+
+  try {
+    return await Promise.race([
+      httpFetch(url, { ...init, signal: controller.signal }),
+      guard,
+    ])
+  } catch (error) {
+    throwIfAborted(signal)
+    if (timedOut) {
+      throw new Error(`${label} timed out after ${Math.max(1, Math.ceil(timeoutMs / 1000))} seconds`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener("abort", onAbort)
+  }
+}
+
+function waitForUploadRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal)
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }, delayMs)
+    const onAbort = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+      reject(new Error("MinerU parsing cancelled"))
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
+function uploadTimeoutMs(byteLength: number): number {
+  const slowTransferMs = Math.ceil(byteLength / MINERU_UPLOAD_MIN_BYTES_PER_SECOND) * 1_000
+  return Math.min(
+    MINERU_UPLOAD_MAX_TIMEOUT_MS,
+    Math.max(MINERU_UPLOAD_MIN_TIMEOUT_MS, slowTransferMs),
+  )
+}
+
+function formatMegabytes(byteLength: number): string {
+  return `${(byteLength / (1024 * 1024)).toFixed(1)} MB`
+}
+
 async function submitUrlTask(
   token: string,
   url: string,
@@ -476,12 +552,11 @@ async function submitUrlTask(
 ): Promise<string> {
   const httpFetch = await getHttpFetch()
   throwIfAborted(signal)
-  const res = await httpFetch(`${API_BASE}/extract/task`, {
+  const res = await fetchWithTimeout(httpFetch, `${API_BASE}/extract/task`, {
     method: "POST",
     headers: await mineruHeaders(token),
-    signal,
     body: JSON.stringify({ url, model_version: modelVersion }),
-  })
+  }, MINERU_API_REQUEST_TIMEOUT_MS, "MinerU task submission", signal)
   if (!res.ok) throw new Error(`MinerU submit failed: HTTP ${res.status}`)
   const json: TaskResponse = await res.json()
   assertMineruSuccess(json)
@@ -494,45 +569,60 @@ async function uploadFileForTask(
   fileBase64: string,
   modelVersion: string,
   signal?: AbortSignal,
+  onProgress?: (msg: string) => void,
 ): Promise<{ batchId: string; uploadUrl: string }> {
   const httpFetch = await getHttpFetch()
   const headers = await mineruHeaders(token)
   throwIfAborted(signal)
-
-  // Step 1: Get upload URL
-  const res = await httpFetch(`${API_BASE}/file-urls/batch`, {
-    method: "POST",
-    headers,
-    signal,
-    body: JSON.stringify({
-      files: [{ name: fileName, data_id: fileName }],
-      model_version: modelVersion,
-    }),
-  })
-  if (!res.ok) throw new Error(`MinerU batch submit failed: HTTP ${res.status}`)
-  const json: UploadUrlResponse = await res.json()
-  assertMineruSuccess(json)
-
-  const batchId = json.data.batch_id
-  const uploadUrl = json.data.file_urls[0]
-  if (!batchId || !uploadUrl) {
-    throw new Error("MinerU did not return a file upload URL")
-  }
-
-  // Step 2: Upload file binary (convert base64 back to binary)
   const bytes = decodeBase64ToBytes(fileBase64)
-  throwIfAborted(signal)
+  const sizeLabel = formatMegabytes(bytes.byteLength)
+  const timeoutMs = uploadTimeoutMs(bytes.byteLength)
+  let lastError: Error | null = null
 
-  const uploadRes = await httpFetch(uploadUrl, {
-    method: "PUT",
-    signal,
-    body: bytesToUploadBody(bytes),
-  })
-  if (!uploadRes.ok && uploadRes.status !== 200 && uploadRes.status !== 201) {
-    throw new Error(`MinerU file upload failed: HTTP ${uploadRes.status}`)
+  for (let attempt = 1; attempt <= MINERU_UPLOAD_ATTEMPTS; attempt++) {
+    throwIfAborted(signal)
+    try {
+      onProgress?.(`Requesting MinerU upload address (attempt ${attempt}/${MINERU_UPLOAD_ATTEMPTS})...`)
+      const res = await fetchWithTimeout(httpFetch, `${API_BASE}/file-urls/batch`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          files: [{ name: fileName, data_id: fileName }],
+          model_version: modelVersion,
+        }),
+      }, MINERU_API_REQUEST_TIMEOUT_MS, "MinerU upload-address request", signal)
+      if (!res.ok) throw new Error(`MinerU batch submit failed: HTTP ${res.status}`)
+      const json: UploadUrlResponse = await res.json()
+      assertMineruSuccess(json)
+
+      const batchId = json.data.batch_id
+      const uploadUrl = json.data.file_urls[0]
+      if (!batchId || !uploadUrl) {
+        throw new Error("MinerU did not return a file upload URL")
+      }
+
+      onProgress?.(`Uploading ${sizeLabel} to MinerU (attempt ${attempt}/${MINERU_UPLOAD_ATTEMPTS})...`)
+      const uploadRes = await fetchWithTimeout(httpFetch, uploadUrl, {
+        method: "PUT",
+        body: bytesToUploadBody(bytes),
+      }, timeoutMs, "MinerU file upload", signal)
+      if (!uploadRes.ok && uploadRes.status !== 200 && uploadRes.status !== 201) {
+        throw new Error(`MinerU file upload failed: HTTP ${uploadRes.status}`)
+      }
+
+      return { batchId, uploadUrl }
+    } catch (error) {
+      throwIfAborted(signal)
+      lastError = error instanceof Error ? error : new Error(String(error))
+      if (attempt >= MINERU_UPLOAD_ATTEMPTS) break
+      onProgress?.(`MinerU upload attempt ${attempt}/${MINERU_UPLOAD_ATTEMPTS} failed; retrying...`)
+      await waitForUploadRetry(attempt === 1 ? 1_000 : 3_000, signal)
+    }
   }
 
-  return { batchId, uploadUrl }
+  throw new Error(
+    `MinerU upload failed after ${MINERU_UPLOAD_ATTEMPTS} attempts: ${lastError?.message ?? "unknown error"}`,
+  )
 }
 
 function waitForPollInterval(signal?: AbortSignal): Promise<void> {
@@ -558,10 +648,9 @@ async function pollTask(token: string, taskId: string, signal?: AbortSignal): Pr
 
   while (Date.now() - start < POLL_TIMEOUT_MS) {
     throwIfAborted(signal)
-    const res = await httpFetch(`${API_BASE}/extract/task/${taskId}`, {
+    const res = await fetchWithTimeout(httpFetch, `${API_BASE}/extract/task/${taskId}`, {
       headers,
-      signal,
-    })
+    }, MINERU_API_REQUEST_TIMEOUT_MS, "MinerU status request", signal)
     if (!res.ok) throw new Error(`MinerU poll failed: HTTP ${res.status}`)
     const json: TaskStatus = await res.json()
     assertMineruSuccess(json)
@@ -590,9 +679,13 @@ async function pollBatchTask(
 
   while (Date.now() - start < POLL_TIMEOUT_MS) {
     throwIfAborted(signal)
-    const res = await httpFetch(
+    const res = await fetchWithTimeout(
+      httpFetch,
       `${API_BASE}/extract-results/batch/${batchId}`,
-      { headers, signal },
+      { headers },
+      MINERU_API_REQUEST_TIMEOUT_MS,
+      "MinerU status request",
+      signal,
     )
     if (!res.ok) throw new Error(`MinerU batch poll failed: HTTP ${res.status}`)
     const json: BatchStatus = await res.json()
@@ -979,14 +1072,13 @@ export async function parseWithMineruResult(
     refreshZipUrl = () => pollTask(config.token, taskId, signal)
     zipUrl = await refreshZipUrl()
   } else {
-    onProgress?.("Uploading file to MinerU...")
     throwIfAborted(signal)
     const fileSize = await getFileSize(sourcePath)
     if (fileSize > MAX_ACCURATE_PARSE_BYTES) {
       throw new Error("MinerU accurate parsing supports files up to 200 MB")
     }
 
-    // Read file as base64
+    onProgress?.(`Reading ${formatMegabytes(fileSize)} PDF for MinerU upload...`)
     const fileName = sourcePath.split("/").pop() ?? "document.pdf"
     throwIfAborted(signal)
     const { base64 } = await readFileAsBase64(sourcePath)
@@ -997,6 +1089,7 @@ export async function parseWithMineruResult(
       base64,
       config.modelVersion,
       signal,
+      onProgress,
     )
     onProgress?.("Waiting for MinerU to finish...")
     refreshZipUrl = () => pollBatchTask(config.token, batchId, signal)
@@ -1073,5 +1166,6 @@ export const __mineruTest = {
   decodeBase64ToBytes,
   rewriteMineruMarkdownImages,
   convertHtmlTablesToMarkdown,
+  fetchWithTimeout,
   MAX_ACCURATE_PARSE_BYTES,
 }
