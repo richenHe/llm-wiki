@@ -174,7 +174,7 @@ describe("captionMarkdownImages", () => {
     expect(out.enrichedMarkdown).toBe("![line1 line2 with ) bracket](/abs/x.png)")
   })
 
-  it("continues batch when one caption call fails, reporting failed count", async () => {
+  it("retries three times, preserves the original, and continues when one caption fails", async () => {
     mockReadBase64.mockImplementation(async (p: string) => {
       if (p === "/abs/a.png") return { base64: "AAAA", mimeType: "image/png" }
       return { base64: "BBBB", mimeType: "image/png" }
@@ -187,15 +187,17 @@ describe("captionMarkdownImages", () => {
     const md = "![](/abs/a.png) ![](/abs/b.png)"
     const out = await captionMarkdownImages("/proj", md, cfg)
 
+    expect(mockCaption).toHaveBeenCalledTimes(4)
     expect(out.freshCaptions).toBe(1)
     expect(out.failed).toBe(1)
     expect(out.failures).toEqual([{
       url: "/abs/b.png",
       message: "HTTP 500",
     }])
-    // Successful one rewritten, failing one keeps original empty alt.
-    expect(out.enrichedMarkdown).toBe("![first](/abs/a.png) ![](/abs/b.png)")
-  })
+    expect(out.enrichedMarkdown).toBe(
+      "![first](/abs/a.png) ![自动图片描述未能生成，原图已保留](/abs/b.png)",
+    )
+  }, 7_000)
 
   it("retries a temporarily busy vision endpoint inside the same image", async () => {
     mockReadBase64.mockResolvedValue({ base64: "AAAA", mimeType: "image/png" })
@@ -208,6 +210,19 @@ describe("captionMarkdownImages", () => {
     expect(mockCaption).toHaveBeenCalledTimes(2)
     expect(out.failed).toBe(0)
     expect(out.enrichedMarkdown).toBe("![recovered caption](/abs/a.png)")
+  }, 7_000)
+
+  it("retries an empty description three times, then preserves the original", async () => {
+    mockReadBase64.mockResolvedValue({ base64: "AAAA", mimeType: "image/png" })
+    mockCaption.mockResolvedValue("   ")
+
+    const out = await captionMarkdownImages("/proj", "![](/abs/a.png)", cfg)
+
+    expect(mockCaption).toHaveBeenCalledTimes(3)
+    expect(out.failed).toBe(1)
+    expect(out.enrichedMarkdown).toBe(
+      "![自动图片描述未能生成，原图已保留](/abs/a.png)",
+    )
   }, 7_000)
 
   it("respects shouldCaption filter: skips URLs that don't match", async () => {

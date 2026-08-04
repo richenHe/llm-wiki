@@ -1192,8 +1192,8 @@ async function autoIngestImpl(
         const failedImages = result.failures
           .map((failure) => `${failure.url}: ${failure.message}`)
           .join(" | ")
-        preprocessingFailures.push(
-          `Image captioning is incomplete: ${result.failed}/${savedImages.length} image(s) failed after retry.${failedImages ? ` ${failedImages}` : ""}`,
+        preparationWarnings.push(
+          `Image captioning continued with preserved originals: ${result.failed}/${savedImages.length} image(s) still lacked an automatic description after 3 attempts.${failedImages ? ` ${failedImages}` : ""}`,
         )
       }
       if (captionAttempted < savedImages.length) {

@@ -49,10 +49,7 @@ interface CaptionEntry {
 type CaptionCache = Record<string, CaptionEntry>
 
 const CACHE_REL_PATH = ".llm-wiki/image-caption-cache.json"
-
-function isTransientCaptionError(message: string): boolean {
-  return /\b(?:429|502|503|504)\b|service\s+(?:is\s+)?too\s+busy|service[_\s-]*unavailable|timeout|timed\s*out|connection\s+(?:reset|closed)|network\s+error|fetch\s+failed/i.test(message)
-}
+const FAILED_CAPTION_PLACEHOLDER = "自动图片描述未能生成，原图已保留"
 
 function waitForCaptionRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(new DOMException("Captioning aborted", "AbortError"))
@@ -398,6 +395,7 @@ export async function captionMarkdownImages(
     if (!absPath) {
       failed++
       failures.push({ url: ref.url, message: "The image path could not be resolved." })
+      captionByUrl.set(ref.url, FAILED_CAPTION_PLACEHOLDER)
       return
     }
 
@@ -414,6 +412,7 @@ export async function captionMarkdownImages(
         url: ref.url,
         message: err instanceof Error ? err.message : String(err),
       })
+      captionByUrl.set(ref.url, FAILED_CAPTION_PLACEHOLDER)
       return
     }
 
@@ -435,21 +434,23 @@ export async function captionMarkdownImages(
       let caption = ""
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          caption = await captionImage(
+          const candidate = await captionImage(
             bytes.base64,
             bytes.mimeType,
             llmConfig,
             options?.signal,
             { contextBefore: before, contextAfter: after },
           )
+          if (!candidate.trim()) {
+            throw new Error("Vision model returned an empty image description")
+          }
+          caption = candidate
           break
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          if (attempt >= 3 || !isTransientCaptionError(message)) throw err
+          if (attempt >= 3) throw err
           await waitForCaptionRetry(attempt === 1 ? 1_000 : 3_000, options?.signal)
         }
       }
-      if (!caption.trim()) throw new Error("Vision model returned an empty image description")
       cache[hash] = {
         caption,
         mimeType: bytes.mimeType,
@@ -480,6 +481,7 @@ export async function captionMarkdownImages(
         url: ref.url,
         message: err instanceof Error ? err.message : String(err),
       })
+      captionByUrl.set(ref.url, FAILED_CAPTION_PLACEHOLDER)
     }
   }
 
