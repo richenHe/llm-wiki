@@ -401,9 +401,11 @@ The complete Chinese product and teaching specification starts at [docs/learning
 
 ## Installation
 
+For a complete source setup on a new Windows PC, follow the [Windows clone, run, and build guide](README_WINDOWS.md). It covers the frontend, Rust desktop backend, bundled PDF runtime, and MCP server; for example, installing only the root npm dependencies does not prepare `mcp-server`.
+
 ### Pre-built Binaries
 
-Download from [Releases](https://github.com/nashsu/llm_wiki/releases):
+Download from [this repository's Releases](https://github.com/richenHe/llm-wiki/releases):
 - **macOS**: `.dmg` (Apple Silicon + Intel)
 - **Windows**: `.msi`
 - **Linux**: `.deb` / `.AppImage`
@@ -411,13 +413,17 @@ Download from [Releases](https://github.com/nashsu/llm_wiki/releases):
 ### Build from Source
 
 ```bash
-# Prerequisites: Node.js 20+, Rust 1.70+
-git clone https://github.com/nashsu/llm_wiki.git
-cd llm_wiki
-npm install
+# Prerequisites: Node.js 20+, Rust stable, system build tools, and protoc
+git clone https://github.com/richenHe/llm-wiki.git
+cd llm-wiki
+npm ci
+npm --prefix mcp-server ci
+npm run mcp:build
 npm run tauri dev      # Development
 npm run tauri build    # Production build
 ```
+
+Windows also requires Microsoft C++ Build Tools and WebView2 Runtime. See [README_WINDOWS.md](README_WINDOWS.md) for exact setup and troubleshooting; for example, a missing `link.exe` usually means the “Desktop development with C++” workload is absent rather than an npm dependency being broken.
 
 ### Chrome Extension
 

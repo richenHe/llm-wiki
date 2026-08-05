@@ -395,9 +395,11 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 
 ## 安装
 
+在 Windows 新电脑上从源码完整安装，请使用 [Windows 克隆、运行与构建指南](README_WINDOWS.md)。该指南同时覆盖主界面、Rust 桌面后端、PDF 解析组件和内置 MCP 工具服务；例如只执行一次根目录依赖安装，并不能完整准备 `mcp-server`。
+
 ### 预编译二进制文件
 
-从 [Releases](https://github.com/nashsu/llm_wiki/releases) 下载：
+从 [本仓库 Releases](https://github.com/richenHe/llm-wiki/releases) 下载：
 - **macOS**：`.dmg`（Apple Silicon + Intel）
 - **Windows**：`.msi`
 - **Linux**：`.deb` / `.AppImage`
@@ -405,13 +407,17 @@ LLM Wiki 是一个跨平台桌面应用，能将你的文档自动转化为有�
 ### 从源码构建
 
 ```bash
-# 前置条件：Node.js 20+, Rust 1.70+
-git clone https://github.com/nashsu/llm_wiki.git
-cd llm_wiki
-npm install
+# 前置条件：Node.js 20+、Rust stable、系统编译工具和 protoc
+git clone https://github.com/richenHe/llm-wiki.git
+cd llm-wiki
+npm ci
+npm --prefix mcp-server ci
+npm run mcp:build
 npm run tauri dev      # 开发模式
 npm run tauri build    # 生产构建
 ```
+
+Windows 还需要 Microsoft C++ Build Tools 和 WebView2 Runtime，完整步骤与错误排查见 [README_WINDOWS.md](README_WINDOWS.md)。例如编译时提示找不到 `link.exe`，通常是没有安装“使用 C++ 的桌面开发”，不是 npm 依赖损坏。
 
 ### Chrome 扩展
 

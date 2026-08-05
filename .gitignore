@@ -52,5 +52,9 @@ pnpm-debug.log*
 
 # Local agent/build scratch files
 .tmp/
+.codex-work/
+tmp/
+node_modules.broken-*/
+/VideoKnowledgeTool.new.exe
 __pycache__/
 *.py[cod]
