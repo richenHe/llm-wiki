@@ -376,6 +376,12 @@ The original is platform-agnostic (abstract pattern). We handle concrete cross-p
 - **Project maintenance** — ZIP export/import for migration and deterministic `wiki/index.md` rebuilding
 - **dataVersion signaling** — graph and UI automatically refresh when wiki content changes
 
+## Universal Learning System
+
+The Learning workspace turns the current wiki into a dynamic-depth, hollow spherical map with path navigation, sibling learning routes, cross-topic relation points, knowledge details, and saved self-explanation practice. It is domain-independent: for example, the same structure can organize high-school physics or a coffee-shop route such as `客 → 品 → 场 → 服 → 营 → 财 → 增`.
+
+The complete Chinese product and teaching specification starts at [docs/learning-system/README.md](docs/learning-system/README.md). It includes the standardized `定 → 图 → 懂 → 联 → 练 → 测 → 迁 → 复` workflow, knowledge-tree rules, functional architecture, interface behavior, and honest MVP limits.
+
 ## Tech Stack
 
 | Layer | Technology |

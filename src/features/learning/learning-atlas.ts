@@ -1,38 +1,17 @@
 import { buildWikiGraph, type GraphEdge, type GraphNode } from "@/lib/wiki-graph"
-import type { LearningNode, LearningRegion } from "./learning-data"
+import type { LearningNode, LearningRegion, LearningRelation } from "./learning-data"
 
 export interface LearningAtlas {
   nodes: LearningNode[]
   regions: LearningRegion[]
+  relations: LearningRelation[]
   isSample: boolean
   totalConcepts: number
 }
 
 const COLORS: LearningRegion["color"][] = ["violet", "blue", "cyan"]
-const TYPE_LABELS: Record<string, string> = {
-  concept: "概念",
-  entity: "实体",
-  source: "来源",
-  overview: "总览",
-  synthesis: "综合",
-  comparison: "比较",
-  finding: "发现",
-  thesis: "论点",
-  methodology: "方法",
-  other: "知识",
-}
-
 function glyph(title: string): string {
   return Array.from(title.trim())[0] ?? "知"
-}
-
-function position(index: number, count: number): { x: number; y: number } {
-  const columns = Math.max(3, Math.ceil(Math.sqrt(Math.max(count, 1) * 1.4)))
-  const rows = Math.max(2, Math.ceil(count / columns))
-  return {
-    x: 14 + (index % columns) * (72 / Math.max(columns - 1, 1)),
-    y: 34 + Math.floor(index / columns) * (52 / Math.max(rows - 1, 1)),
-  }
 }
 
 function regionPosition(index: number, count: number) {
@@ -48,14 +27,6 @@ function regionPosition(index: number, count: number) {
   }
 }
 
-function relatedIds(nodeId: string, edges: readonly GraphEdge[]): string[] {
-  return edges
-    .filter((edge) => edge.source === nodeId || edge.target === nodeId)
-    .sort((a, b) => b.weight - a.weight)
-    .slice(0, 4)
-    .map((edge) => edge.source === nodeId ? edge.target : edge.source)
-}
-
 export function buildLearningAtlasFromGraph(graph: {
   nodes: GraphNode[]
   edges: GraphEdge[]
@@ -69,12 +40,20 @@ export function buildLearningAtlasFromGraph(graph: {
 
   const rankedCommunities = [...communities.entries()]
     .sort((a, b) => b[1].length - a[1].length)
-  const visibleRegionCount = Math.min(9, rankedCommunities.length)
+  const visibleRegionCount = rankedCommunities.length
   const nodes: LearningNode[] = []
   const regions: LearningRegion[] = []
+  const relations: LearningRelation[] = graph.edges.map((edge) => ({
+    sourceId: edge.source,
+    targetId: edge.target,
+    kind: "related",
+    weight: edge.weight,
+    reason: "知识库页面通过引用或内容关联相连。",
+  }))
 
   rankedCommunities.forEach(([communityId, members], regionIndex) => {
     const ranked = [...members].sort((a, b) => b.linkCount - a.linkCount || a.label.localeCompare(b.label, "zh-CN"))
+    const learningOrder = [...members].sort((a, b) => a.path.localeCompare(b.path, "zh-CN", { numeric: true }) || a.label.localeCompare(b.label, "zh-CN"))
     const anchor = ranked[0]
     const regionId = `atlas-region-${communityId}`
     const regionTitle = anchor?.label ?? `主题 ${regionIndex + 1}`
@@ -93,87 +72,55 @@ export function buildLearningAtlasFromGraph(graph: {
       kind: "region",
     })
 
-    const typeGroups = new Map<string, GraphNode[]>()
-    for (const member of ranked) {
-      const group = typeGroups.get(member.type) ?? []
-      group.push(member)
-      typeGroups.set(member.type, group)
-    }
-    const groupEntries = [...typeGroups.entries()].sort((a, b) => b[1].length - a[1].length)
-    const groupIds: string[] = []
-    groupEntries.forEach(([type, group], groupIndex) => {
-      const title = TYPE_LABELS[type] ?? type
-      const groupId = `${regionId}:group:${type}`
-      groupIds.push(groupId)
+    learningOrder.forEach((member) => {
       nodes.push({
-        id: groupId,
-        title,
-        glyph: glyph(title),
-        essence: `按“${title}”整理的 ${group.length} 个知识点。`,
+        id: member.id,
+        title: member.label,
+        glyph: glyph(member.label),
+        essence: member.summary ?? `理解“${member.label}”在当前知识体系中的含义与联系。`,
         parentId: regionId,
         prerequisiteIds: [],
         source: "当前项目知识库",
-        sourceDetail: `${regionTitle} / ${title}`,
-        capabilities: ["分类理解"],
+        sourceDetail: member.path,
+        capabilities: ["理解概念", "连接知识"],
         mastery: "unseen",
-        position: position(groupIndex, Math.max(groupEntries.length, 4)),
-        kind: "group",
+        position: { x: 50, y: 50 },
+        kind: "concept",
+        sourcePath: member.path,
+        linkCount: member.linkCount,
+        semanticType: member.type,
       })
-      group.forEach((member) => {
+      for (const outline of member.outline ?? []) {
         nodes.push({
-          id: member.id,
-          title: member.label,
-          glyph: glyph(member.label),
-          essence: member.summary ?? `理解“${member.label}”在当前知识体系中的含义与联系。`,
-          parentId: groupId,
-          prerequisiteIds: relatedIds(member.id, graph.edges),
-          source: "当前项目知识库",
-          sourceDetail: member.path,
-          capabilities: ["理解概念", "连接知识"],
+          id: outline.id,
+          title: outline.title,
+          glyph: glyph(outline.title),
+          essence: outline.summary,
+          parentId: outline.parentId ?? member.id,
+          prerequisiteIds: [],
+          source: member.label,
+          sourceDetail: `${member.path} / ${outline.title}`,
+          capabilities: ["逐层理解"],
           mastery: "unseen",
           position: { x: 50, y: 50 },
           kind: "concept",
           sourcePath: member.path,
-          linkCount: member.linkCount,
+          linkCount: 0,
+          semanticType: member.type,
         })
-        for (const outline of member.outline ?? []) {
-          nodes.push({
-            id: outline.id,
-            title: outline.title,
-            glyph: glyph(outline.title),
-            essence: outline.summary,
-            parentId: outline.parentId ?? member.id,
-            prerequisiteIds: [],
-            source: member.label,
-            sourceDetail: `${member.path} / ${outline.title}`,
-            capabilities: ["逐层理解"],
-            mastery: "unseen",
-            position: { x: 50, y: 50 },
-            kind: "concept",
-            sourcePath: member.path,
-            linkCount: 0,
-          })
-        }
-      })
+      }
     })
 
-    const visibleConcepts = ranked.slice(0, Math.max(8, 18 - groupIds.length))
-    visibleConcepts.forEach((member, index) => {
-      const target = nodes.find((node) => node.id === member.id)
-      if (target) target.position = position(index + groupIds.length, visibleConcepts.length + groupIds.length)
+    regions.push({
+      id: regionId,
+      title: regionTitle,
+      color: COLORS[regionIndex % COLORS.length],
+      position: regionPosition(regionIndex, visibleRegionCount),
+      nodeIds: [regionId, ...learningOrder.map((member) => member.id)],
     })
-    if (regionIndex < visibleRegionCount) {
-      regions.push({
-        id: regionId,
-        title: regionTitle,
-        color: COLORS[regionIndex % COLORS.length],
-        position: regionPosition(regionIndex, visibleRegionCount),
-        nodeIds: [regionId, ...groupIds, ...visibleConcepts.map((member) => member.id)],
-      })
-    }
   })
 
-  return { nodes, regions, isSample: false, totalConcepts: graph.nodes.length }
+  return { nodes, regions, relations, isSample: false, totalConcepts: graph.nodes.length }
 }
 
 export async function loadProjectLearningAtlas(projectPath: string): Promise<LearningAtlas> {

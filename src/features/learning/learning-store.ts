@@ -43,7 +43,7 @@ const initialState = {
   selectedNodeId: DEFAULT_LEARNING_NODE_ID,
   zoom: 1,
   query: "",
-  detailOpen: true,
+  detailOpen: false,
   lessonOpen: false,
   lessonAnswer: "",
   lessonSubmitted: false,
@@ -54,7 +54,7 @@ const initialState = {
 
 export const useLearningStore = create<LearningState>((set, get) => ({
   ...initialState,
-  selectNode: (selectedNodeId) => set({ selectedNodeId, detailOpen: true, lessonOpen: false, lessonAnswer: "", lessonSubmitted: false }),
+  selectNode: (selectedNodeId) => set({ selectedNodeId, lessonOpen: false, lessonAnswer: "", lessonSubmitted: false }),
   setZoom: (zoom) => set({ zoom: Math.min(1.3, Math.max(0.75, zoom)) }),
   setQuery: (query) => set({ query }),
   setDetailOpen: (detailOpen) => set({ detailOpen }),

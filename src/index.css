@@ -3,6 +3,222 @@
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
 
+/* Learning atlas: hollow spatial instrument */
+.knowledge-atlas-header {
+  position: relative;
+  z-index: 50;
+  display: flex;
+  height: 58px;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--background) 96%, transparent);
+  padding: 0 20px;
+}
+
+.knowledge-canvas-grid {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle at center, rgb(148 163 184 / 0.16) 0.65px, transparent 0.75px);
+  background-size: 28px 28px;
+  mask-image: radial-gradient(circle at center, black, transparent 74%);
+}
+
+.knowledge-path-panel {
+  position: absolute;
+  z-index: 35;
+  left: 18px;
+  top: 18px;
+  display: flex;
+  width: 252px;
+  max-height: calc(100% - 36px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgb(203 213 225 / 0.85);
+  border-radius: 12px;
+  background: rgb(255 255 255 / 0.94);
+  box-shadow: 0 14px 36px rgb(15 23 42 / 0.08);
+  backdrop-filter: blur(12px);
+}
+
+.knowledge-tree-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.knowledge-tree-row {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  padding-right: 8px;
+  color: #475569;
+}
+
+.knowledge-tree-row:hover { background: #f8fafc; }
+.knowledge-tree-row.is-active { background: #eff6ff; color: #1d4ed8; }
+
+.knowledge-tree-toggle {
+  display: flex;
+  width: 20px;
+  height: 24px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.knowledge-tree-toggle:hover { background: #e2e8f0; }
+.knowledge-tree-leaf { width: 20px; flex-shrink: 0; }
+
+.knowledge-tree-name {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.knowledge-tree-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: white;
+}
+
+.knowledge-tree-row.is-active .knowledge-tree-dot { background: #2563eb; }
+
+.knowledge-sphere-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgb(203 213 225 / 0.85);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.92);
+  padding: 4px 7px;
+  color: #475569;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgb(15 23 42 / 0.08);
+  backdrop-filter: blur(8px);
+  transition: border-color 140ms ease, color 140ms ease, transform 140ms ease;
+}
+
+.knowledge-sphere-label:hover { transform: translateY(-1px); border-color: #94a3b8; color: #0f172a; }
+.knowledge-sphere-label.is-child { border-color: rgb(148 163 184 / 0.8); color: #334155; }
+.knowledge-sphere-label.is-selected { border-color: #2563eb; background: #2563eb; color: white; box-shadow: 0 0 0 4px rgb(37 99 235 / 0.12), 0 8px 22px rgb(37 99 235 / 0.2); }
+.knowledge-sphere-label strong { max-width: 118px; overflow: hidden; text-overflow: ellipsis; font-size: 10px; }
+
+.knowledge-relation-label,
+.knowledge-relation-count {
+  display: flex;
+  height: 24px;
+  min-width: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgb(124 58 237 / 0.38);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.94);
+  padding: 0 6px;
+  color: #6d28d9;
+  font-size: 10px;
+  font-weight: 650;
+  box-shadow: 0 4px 12px rgb(76 29 149 / 0.12);
+}
+
+.knowledge-relation-label:hover { border-color: #7c3aed; background: #f5f3ff; }
+
+.knowledge-tool-button {
+  display: flex;
+  height: 34px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgb(203 213 225 / 0.9);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 0.94);
+  padding: 0 11px;
+  color: #475569;
+  font-size: 12px;
+  box-shadow: 0 4px 12px rgb(15 23 42 / 0.05);
+}
+
+.knowledge-tool-button:hover { background: white; color: #0f172a; }
+
+.knowledge-zoom-button {
+  display: flex;
+  width: 40px;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+}
+
+.knowledge-zoom-button:hover { background: #f8fafc; color: #0f172a; }
+
+.knowledge-route-card {
+  position: absolute;
+  z-index: 36;
+  right: 72px;
+  bottom: 18px;
+  width: min(350px, calc(100% - 360px));
+  border: 1px solid rgb(203 213 225 / 0.9);
+  border-radius: 12px;
+  background: rgb(255 255 255 / 0.96);
+  padding: 16px;
+  box-shadow: 0 16px 40px rgb(15 23 42 / 0.1);
+  backdrop-filter: blur(12px);
+}
+
+.route-glyph {
+  display: flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: white;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.route-glyph:hover { border-color: #64748b; color: #0f172a; }
+.route-glyph.is-current { border-color: #2563eb; background: #2563eb; color: white; box-shadow: 0 0 0 4px rgb(37 99 235 / 0.1); }
+
+.knowledge-detail-drawer {
+  position: absolute;
+  z-index: 60;
+  inset-block: 0;
+  right: 0;
+  display: flex;
+  width: 360px;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: white;
+  box-shadow: -18px 0 48px rgb(15 23 42 / 0.1);
+}
+
+@media (max-width: 900px) {
+  .knowledge-path-panel { width: 220px; }
+  .knowledge-route-card { left: 18px; right: 64px; width: auto; }
+  .knowledge-atlas-header nav { display: none; }
+  .knowledge-atlas-header { padding-inline: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .knowledge-sphere-label,
+  .knowledge-tree-toggle { transition: none; }
+}
 @custom-variant dark (&:is(.dark *));
 
 /* Chat answers need stronger document hierarchy than compact tool output. Keep

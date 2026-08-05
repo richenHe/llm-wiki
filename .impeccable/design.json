@@ -1,0 +1,18 @@
+{
+  "scope": "learning-atlas",
+  "source": "DESIGN.md",
+  "mode": "scan",
+  "direction": "Hollow Knowledge Instrument",
+  "approvedReferences": [
+    "C:/Users/何日琛/.codex/generated_images/019fc762-fc62-79f0-ad97-357dd73f1778/exec-b7f6aa74-a091-4e13-825b-050acc7a708a.png",
+    "C:/Users/何日琛/.codex/generated_images/019fc762-fc62-79f0-ad97-357dd73f1778/exec-f06bdb5c-fa06-4b58-a9c1-6ddc72ba5b6a.png",
+    "C:/Users/何日琛/.codex/generated_images/019fc762-fc62-79f0-ad97-357dd73f1778/exec-e704276c-45c3-4ecc-ae78-418c20902176.png"
+  ],
+  "rules": {
+    "solidSphere": false,
+    "fixedRegionGrid": false,
+    "crossRelationAsPoint": true,
+    "semanticTypesAreHierarchy": false,
+    "dynamicDepth": true
+  }
+}

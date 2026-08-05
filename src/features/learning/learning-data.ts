@@ -15,6 +15,18 @@ export interface LearningNode {
   kind?: "region" | "group" | "concept"
   sourcePath?: string
   linkCount?: number
+  semanticType?: string
+  routeMnemonic?: string
+}
+
+export type LearningRelationKind = "prerequisite" | "related"
+
+export interface LearningRelation {
+  sourceId: string
+  targetId: string
+  kind: LearningRelationKind
+  weight: number
+  reason: string
 }
 
 export interface LearningRegion {
@@ -50,6 +62,58 @@ export const LEARNING_REGIONS: LearningRegion[] = [
 ]
 
 export const DEFAULT_LEARNING_NODE_ID = "acceleration"
+
+export function getLearningChildren(nodeId: string | null, nodes: readonly LearningNode[]): LearningNode[] {
+  return nodes.filter((node) => node.parentId === nodeId)
+}
+
+export function getLearningSiblings(nodeId: string, nodes: readonly LearningNode[]): LearningNode[] {
+  const node = nodes.find((item) => item.id === nodeId)
+  if (!node) return []
+  return getLearningChildren(node.parentId, nodes)
+}
+
+export function buildLearningRoute(nodeId: string, nodes: readonly LearningNode[]): LearningNode[] {
+  const siblings = getLearningSiblings(nodeId, nodes)
+  if (siblings.length < 2) return siblings
+  const siblingIds = new Set(siblings.map((node) => node.id))
+  const indegree = new Map(siblings.map((node) => [node.id, 0]))
+  const outgoing = new Map(siblings.map((node) => [node.id, [] as string[]]))
+  for (const node of siblings) {
+    for (const prerequisiteId of node.prerequisiteIds) {
+      if (!siblingIds.has(prerequisiteId)) continue
+      indegree.set(node.id, (indegree.get(node.id) ?? 0) + 1)
+      outgoing.get(prerequisiteId)?.push(node.id)
+    }
+  }
+  const originalOrder = new Map(siblings.map((node, index) => [node.id, index]))
+  const ready = siblings.filter((node) => indegree.get(node.id) === 0)
+  const result: LearningNode[] = []
+  while (ready.length > 0) {
+    ready.sort((a, b) => (originalOrder.get(a.id) ?? 0) - (originalOrder.get(b.id) ?? 0))
+    const current = ready.shift()
+    if (!current) break
+    result.push(current)
+    for (const targetId of outgoing.get(current.id) ?? []) {
+      const next = (indegree.get(targetId) ?? 1) - 1
+      indegree.set(targetId, next)
+      if (next === 0) {
+        const target = siblings.find((node) => node.id === targetId)
+        if (target) ready.push(target)
+      }
+    }
+  }
+  return result.length === siblings.length ? result : siblings
+}
+
+export function buildRouteMnemonic(route: readonly LearningNode[]): string {
+  const configured = route.find((node) => node.routeMnemonic)?.routeMnemonic
+  if (configured) return configured
+  if (route.length === 0) return ""
+  if (route.length === 1) return `先抓住“${route[0].glyph}”，再进入细节。`
+  const compact = route.map((node) => node.glyph).join("、")
+  return `顺着“${compact}”逐步掌握；先理解前一项，再连接后一项。`
+}
 
 export function findLearningNode(id: string, nodes: readonly LearningNode[] = LEARNING_NODES): LearningNode {
   return nodes.find((node) => node.id === id) ?? nodes[0] ?? LEARNING_NODES[0]
