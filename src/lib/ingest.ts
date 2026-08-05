@@ -1576,44 +1576,15 @@ async function autoIngestImpl(
   const prewriteMissing = requestedGenerationPaths.filter(
     (path) => !prewriteCompleted.has(normalizePath(path).toLowerCase()),
   )
+  const prewriteWarnings: string[] = []
   if (prewriteMissing.length > 0) {
     const detail = [
       ...generationBatchFailures,
       prewriteMissing.length > 0
-        ? `Incomplete ingest: ${prewriteMissing.length} expected page(s) missing before write: ${prewriteMissing.join(", ")}`
+        ? `Continuing with partial results: ${prewriteMissing.length} expected page(s) missing before write: ${prewriteMissing.join(", ")}`
         : "",
     ].filter(Boolean).join(" ")
-    await appendIngestWarningLog(pp, sourceIdentity, [detail])
-    try {
-      await writeIngestDiagnosticReport(pp, sourceSummarySlug, {
-        source: sourceIdentity,
-        extractionMode: documentResult.extractionMode,
-        degraded: documentResult.degraded,
-        sourcePages: documentResult.sourcePageCount,
-        processedPages: documentResult.processedPageCount,
-        extractedImages: savedImages.length,
-        captionAttempted,
-        captionFresh,
-        captionCached,
-        captionFailed,
-        captionFailures: captionFailureDetails,
-        resumedKnowledgePages,
-        resumedWrittenPages: 0,
-        modelCalls,
-        expectedKnowledgePages: expectedKnowledgePaths.length,
-        missingKnowledgePages: prewriteMissing,
-        warnings: preparationWarnings,
-        failures: [detail],
-        complete: false,
-      })
-    } catch (diagnosticError) {
-      console.warn(
-        `[ingest:diag] failed to save pre-write diagnostic for "${sourceIdentity}":`,
-        diagnosticError instanceof Error ? diagnosticError.message : diagnosticError,
-      )
-    }
-    activity.updateItem(activityId, { status: "error", detail })
-    throw new IngestNeedsAttentionError(detail)
+    prewriteWarnings.push(detail)
   }
 
   const verifiedWrittenFiles: StoredWrittenFile[] = []
@@ -1725,7 +1696,7 @@ async function autoIngestImpl(
   throwIfIngestAborted(signal, activityId)
   const writtenPaths = writeResult.writtenPaths
   const completedInputPaths = [...writeResult.completedInputPaths]
-  const writeWarnings = [...preparationWarnings, ...writeResult.warnings]
+  const writeWarnings = [...preparationWarnings, ...prewriteWarnings, ...writeResult.warnings]
   const hardFailures = [...writeResult.hardFailures]
   let unrecoveredTruncatedPaths = uniqueNormalizedPaths(
     writeResult.truncatedPaths.filter((path) =>
@@ -2167,11 +2138,20 @@ async function autoIngestImpl(
     }
   }
 
+  // Individual knowledge pages are useful but non-critical. Once bounded
+  // repair is exhausted, keep the pages that did succeed and surface the
+  // missing ones as warnings. The source summary is the minimum usable
+  // result: if it cannot be written, the ingest has no trustworthy entry
+  // point and must still fail.
   const ingestComplete = writtenPaths.length > 0 &&
     preprocessingFailures.length === 0 &&
-    hardFailures.length === 0 &&
-    unrecoveredTruncatedPaths.length === 0 &&
-    incompleteExpectedPaths.length === 0
+    hasSourceSummary
+  const completedWithWarnings = ingestComplete && (
+    writeWarnings.length > 0 ||
+    hardFailures.length > 0 ||
+    unrecoveredTruncatedPaths.length > 0 ||
+    incompleteExpectedPaths.length > 0
+  )
   const baseDetail = writtenPaths.length > 0
     ? `${writtenPaths.length} files written${reviewItems.length > 0 ? `, ${reviewItems.length} review item(s)` : ""}`
     : "No files generated"
@@ -2179,10 +2159,12 @@ async function autoIngestImpl(
   const reuseDetail = resumedKnowledgePages > 0 || resumedWrittenPages > 0
     ? `; reused ${resumedKnowledgePages} generated and ${resumedWrittenPages} already-written page(s)`
     : ""
-  const incompleteSummary = !ingestComplete
-    ? `Incomplete ingest: ${preprocessingFailures.length} preprocessing failure(s), ${hardFailures.length} write failure(s), ${unrecoveredTruncatedPaths.length} truncated file(s), ${incompleteExpectedPaths.length} expected page(s) missing.${preprocessingFailures.length > 0 ? ` ${preprocessingFailures.join(" ")}` : ""}`
-    : ""
-  const detailBase = `${incompleteSummary ? `${baseDetail} — ${incompleteSummary}` : baseDetail}; ${modelCallDetail}${reuseDetail}`
+  const outcomeSummary = !ingestComplete
+    ? `Ingest failed: ${preprocessingFailures.length} preprocessing failure(s), source summary ${hasSourceSummary ? "written" : "missing"}, ${hardFailures.length} write failure(s).${preprocessingFailures.length > 0 ? ` ${preprocessingFailures.join(" ")}` : ""}`
+    : completedWithWarnings
+      ? `Completed with warnings: ${hardFailures.length} write failure(s), ${unrecoveredTruncatedPaths.length} truncated file(s), ${incompleteExpectedPaths.length} expected page(s) skipped.`
+      : ""
+  const detailBase = `${outcomeSummary ? `${baseDetail} — ${outcomeSummary}` : baseDetail}; ${modelCallDetail}${reuseDetail}`
   const detail = warningSummary
     ? `${detailBase} — ${warningSummary} (saved to .llm-wiki/ingest-warnings.log)`
     : detailBase
@@ -2223,7 +2205,7 @@ async function autoIngestImpl(
   })
 
   if (!ingestComplete) {
-    throw new IngestNeedsAttentionError(incompleteSummary || "Ingest produced no output files")
+    throw new IngestNeedsAttentionError(outcomeSummary || "Ingest produced no usable source summary")
   }
 
   return writtenPaths

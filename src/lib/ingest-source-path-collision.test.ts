@@ -885,30 +885,72 @@ describe("autoIngest source summary paths", () => {
     expect(useActivityStore.getState().items[0]?.status).toBe("done")
   })
 
-  it("fails visibly when expected analysis pages remain missing after bounded repair", async () => {
+  it("keeps usable results when an optional analysis page remains missing after bounded repair", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["project-a config"]
     analysisOverride = "## Generation Contract\n- [[concepts/still-missing]] — required."
     missingPageRepairResponse = ""
 
-    await expect(
-      autoIngest(
-        tmp.path,
-        `${tmp.path}/raw/sources/project-a/config.yaml`,
-        useWikiStore.getState().llmConfig,
-        undefined,
-        "project-a",
-      ),
-    ).rejects.toThrow(/1 expected page\(s\) missing/)
+    const written = await autoIngest(
+      tmp.path,
+      `${tmp.path}/raw/sources/project-a/config.yaml`,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+    )
 
     const activity = useActivityStore.getState().items[0]
-    expect(activity?.status).toBe("error")
-    expect(activity?.detail).toContain("1 expected page(s) missing")
+    expect(written).toContain(
+      `wiki/sources/${sourceSummarySlugFromIdentity("project-a/config.yaml")}.md`,
+    )
+    expect(activity?.status).toBe("done")
+    expect(activity?.detail).toContain("Completed with warnings")
+    expect(activity?.detail).toContain("1 expected page(s) skipped")
     expect(
       mockStreamChat.mock.calls.filter(([, messages]) =>
         String(messages[0]?.content ?? "").startsWith("You are completing wiki pages"),
       ),
-    ).toHaveLength(2)
+    ).toHaveLength(4)
+  })
+
+  it("completes with warnings when one generated page is rejected by project routing", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    sourceMarkers = ["project-a config"]
+    analysisOverride = "## Generation Contract\n- [[goals/parent/child]] — optional nested page."
+    missingPageRepairResponse = [
+      "---FILE: wiki/goals/parent/child.md---",
+      "---",
+      "type: goal",
+      "title: Nested Goal",
+      "tags: [test]",
+      "related: []",
+      'sources: ["project-a/config.yaml"]',
+      "---",
+      "",
+      "# Nested Goal",
+      "",
+      "This page is intentionally routed to an invalid nested directory.",
+      "---END FILE---",
+    ].join("\n")
+
+    const written = await autoIngest(
+      tmp.path,
+      `${tmp.path}/raw/sources/project-a/config.yaml`,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+    )
+
+    expect(written).toContain(
+      `wiki/sources/${sourceSummarySlugFromIdentity("project-a/config.yaml")}.md`,
+    )
+    expect(written).not.toContain("wiki/goals/parent/child.md")
+    await expect(fs.access(`${tmp.path}/wiki/goals/parent/child.md`)).rejects.toThrow()
+    const activity = useActivityStore.getState().items[0]
+    expect(activity?.status).toBe("done")
+    expect(activity?.detail).toContain("Completed with warnings")
+    expect(activity?.detail).toContain("1 expected page(s) skipped")
+    expect(activity?.detail).toContain("must be under \"wiki/goals/\"")
   })
 
   it("resumes wiki generation from saved complete blocks instead of regenerating successful batches", async () => {
@@ -939,13 +981,18 @@ describe("autoIngest source summary paths", () => {
       ? { output: renderBlocks(paths) }
       : { error: "simulated connection loss" }
 
-    await expect(autoIngest(
+    const partialWritten = await autoIngest(
       tmp.path,
       `${tmp.path}/raw/sources/project-a/config.yaml`,
       useWikiStore.getState().llmConfig,
       undefined,
       "project-a",
-    )).rejects.toThrow(/expected page\(s\) missing/)
+    )
+    expect(partialWritten).toEqual(expect.arrayContaining(conceptPaths.slice(0, 5)))
+    expect(useActivityStore.getState().items[0]).toMatchObject({
+      status: "done",
+      detail: expect.stringContaining("Completed with warnings"),
+    })
 
     const completedFirstBatch = [...generationBatchRequests[0]]
     expect(completedFirstBatch).toHaveLength(6)
@@ -1055,13 +1102,19 @@ describe("autoIngest source summary paths", () => {
         : { output: renderBlocks(paths) }
     )
 
-    await expect(autoIngest(
+    const partialWritten = await autoIngest(
       tmp.path,
       `${tmp.path}/raw/sources/project-a/config.yaml`,
       useWikiStore.getState().llmConfig,
       undefined,
       "project-a",
-    )).rejects.toThrow(/expected page\(s\) missing/)
+    )
+    expect(partialWritten).toContain("wiki/concepts/large-topic-23.md")
+    expect(partialWritten).not.toContain("wiki/concepts/large-topic-24.md")
+    expect(useActivityStore.getState().items[0]).toMatchObject({
+      status: "done",
+      detail: expect.stringContaining("Completed with warnings"),
+    })
 
     failTargetBatch = false
     generationBatchRequests = []
