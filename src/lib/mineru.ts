@@ -3,6 +3,7 @@ import type { MineruConfig } from "@/stores/wiki-store"
 import { createDirectory, getFileSize, readFileAsBase64, writeFileBase64 } from "@/commands/fs"
 import { getHttpFetch } from "@/lib/tauri-fetch"
 import { downloadMineruZipDirect } from "@/lib/mineru-direct-download"
+import { uploadMineruFile } from "@/lib/mineru-native-upload"
 import { getFileName, normalizePath } from "@/lib/path-utils"
 import type { SavedImage } from "@/lib/extract-source-images"
 
@@ -566,7 +567,8 @@ async function submitUrlTask(
 async function uploadFileForTask(
   token: string,
   fileName: string,
-  fileBase64: string,
+  sourcePath: string,
+  fileSize: number,
   modelVersion: string,
   signal?: AbortSignal,
   onProgress?: (msg: string) => void,
@@ -574,9 +576,8 @@ async function uploadFileForTask(
   const httpFetch = await getHttpFetch()
   const headers = await mineruHeaders(token)
   throwIfAborted(signal)
-  const bytes = decodeBase64ToBytes(fileBase64)
-  const sizeLabel = formatMegabytes(bytes.byteLength)
-  const timeoutMs = uploadTimeoutMs(bytes.byteLength)
+  const sizeLabel = formatMegabytes(fileSize)
+  const timeoutMs = uploadTimeoutMs(fileSize)
   let lastError: Error | null = null
 
   for (let attempt = 1; attempt <= MINERU_UPLOAD_ATTEMPTS; attempt++) {
@@ -602,13 +603,11 @@ async function uploadFileForTask(
       }
 
       onProgress?.(`Uploading ${sizeLabel} to MinerU (attempt ${attempt}/${MINERU_UPLOAD_ATTEMPTS})...`)
-      const uploadRes = await fetchWithTimeout(httpFetch, uploadUrl, {
-        method: "PUT",
-        body: bytesToUploadBody(bytes),
-      }, timeoutMs, "MinerU file upload", signal)
-      if (!uploadRes.ok && uploadRes.status !== 200 && uploadRes.status !== 201) {
-        throw new Error(`MinerU file upload failed: HTTP ${uploadRes.status}`)
-      }
+      await uploadMineruFile(uploadUrl, sourcePath, timeoutMs, signal, (progress) => {
+        const sent = formatMegabytes(progress.sentBytes)
+        const speed = `${(progress.bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`
+        onProgress?.(`Uploading ${sent} / ${sizeLabel} to MinerU (${progress.percent.toFixed(0)}%, ${speed}, attempt ${attempt}/${MINERU_UPLOAD_ATTEMPTS})...`)
+      })
 
       return { batchId, uploadUrl }
     } catch (error) {
@@ -1078,15 +1077,15 @@ export async function parseWithMineruResult(
       throw new Error("MinerU accurate parsing supports files up to 200 MB")
     }
 
-    onProgress?.(`Reading ${formatMegabytes(fileSize)} PDF for MinerU upload...`)
-    const fileName = sourcePath.split("/").pop() ?? "document.pdf"
+    onProgress?.(`Preparing ${formatMegabytes(fileSize)} PDF for MinerU upload...`)
+    const fileName = getFileName(sourcePath) || "document.pdf"
     throwIfAborted(signal)
-    const { base64 } = await readFileAsBase64(sourcePath)
 
     const { batchId } = await uploadFileForTask(
       config.token,
       fileName,
-      base64,
+      sourcePath,
+      fileSize,
       config.modelVersion,
       signal,
       onProgress,

@@ -5,6 +5,15 @@ const mockHttpFetch = vi.fn<(url: string, opts?: RequestInit) => Promise<Respons
 const directDownloadMocks = vi.hoisted(() => ({
   download: vi.fn<(url: string) => Promise<ArrayBuffer>>(),
 }))
+const nativeUploadMocks = vi.hoisted(() => ({
+  upload: vi.fn<(
+    url: string,
+    path: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+    onProgress?: (progress: { sentBytes: number; totalBytes: number; bytesPerSecond: number; percent: number }) => void,
+  ) => Promise<void>>(),
+}))
 
 vi.mock("@/lib/tauri-fetch", () => ({
   getHttpFetch: () => Promise.resolve(mockHttpFetch),
@@ -12,6 +21,10 @@ vi.mock("@/lib/tauri-fetch", () => ({
 
 vi.mock("@/lib/mineru-direct-download", () => ({
   downloadMineruZipDirect: directDownloadMocks.download,
+}))
+
+vi.mock("@/lib/mineru-native-upload", () => ({
+  uploadMineruFile: nativeUploadMocks.upload,
 }))
 
 const fsMocks = vi.hoisted(() => ({
@@ -55,6 +68,7 @@ beforeEach(() => {
   vi.useRealTimers()
   mockHttpFetch.mockReset()
   directDownloadMocks.download.mockReset()
+  nativeUploadMocks.upload.mockReset()
   fsMocks.createDirectory.mockReset()
   fsMocks.getFileSize.mockReset()
   fsMocks.readFileAsBase64.mockReset()
@@ -66,6 +80,7 @@ beforeEach(() => {
     mimeType: "application/pdf",
   })
   fsMocks.writeFileBase64.mockResolvedValue(undefined)
+  nativeUploadMocks.upload.mockResolvedValue(undefined)
 })
 
 describe("MinerU API helpers", () => {
@@ -607,13 +622,11 @@ describe("parseWithMineru", () => {
         msg: "ok",
         data: { batch_id: "batch-1", file_urls: ["https://upload-1"] },
       }))
-      .mockResolvedValueOnce(new Response("", { status: 503 }))
       .mockResolvedValueOnce(jsonResponse({
         code: 0,
         msg: "ok",
         data: { batch_id: "batch-2", file_urls: ["https://upload-2"] },
       }))
-      .mockResolvedValueOnce(new Response("", { status: 200 }))
       .mockResolvedValueOnce(jsonResponse({
         code: 0,
         msg: "ok",
@@ -623,6 +636,9 @@ describe("parseWithMineru", () => {
         },
       }))
       .mockResolvedValueOnce(await zipResponse({ "full.md": "parsed markdown" }))
+    nativeUploadMocks.upload
+      .mockRejectedValueOnce(new Error("HTTP 503"))
+      .mockResolvedValueOnce(undefined)
 
     await expect(parseWithMineru({
       enabled: true,
@@ -632,11 +648,13 @@ describe("parseWithMineru", () => {
 
     expect(mockHttpFetch.mock.calls.map(([url]) => url)).toEqual([
       "https://mineru.net/api/v4/file-urls/batch",
-      "https://upload-1",
       "https://mineru.net/api/v4/file-urls/batch",
-      "https://upload-2",
       "https://mineru.net/api/v4/extract-results/batch/batch-2",
       "https://zip",
+    ])
+    expect(nativeUploadMocks.upload.mock.calls.map(([url, path]) => [url, path])).toEqual([
+      ["https://upload-1", "/tmp/doc.pdf"],
+      ["https://upload-2", "/tmp/doc.pdf"],
     ])
     expect(progress).toContain("MinerU upload attempt 1/3 failed; retrying...")
     expect(progress).toContain("Uploading 0.0 MB to MinerU (attempt 2/3)...")
@@ -661,18 +679,13 @@ describe("parseWithMineru", () => {
     vi.useRealTimers()
   })
 
-  it("uploads the decoded PDF bytes to the MinerU upload URL", async () => {
-    fsMocks.readFileAsBase64.mockResolvedValueOnce({
-      base64: btoa("custom pdf bytes"),
-      mimeType: "application/pdf",
-    })
+  it("uploads the PDF by file path without reading it through frontend IPC", async () => {
     mockHttpFetch
       .mockResolvedValueOnce(jsonResponse({
         code: 0,
         msg: "ok",
         data: { batch_id: "batch-1", file_urls: ["https://upload"] },
       }))
-      .mockResolvedValueOnce(new Response("", { status: 200 }))
       .mockResolvedValueOnce(jsonResponse({
         code: 0,
         msg: "ok",
@@ -689,9 +702,14 @@ describe("parseWithMineru", () => {
       modelVersion: "vlm",
     }, "/tmp/doc.pdf")).resolves.toBe("parsed markdown")
 
-    const uploadBody = mockHttpFetch.mock.calls[1]?.[1]?.body
-    expect(uploadBody).toBeInstanceOf(ArrayBuffer)
-    expect(new TextDecoder().decode(uploadBody as ArrayBuffer)).toBe("custom pdf bytes")
+    expect(fsMocks.readFileAsBase64).not.toHaveBeenCalled()
+    expect(nativeUploadMocks.upload).toHaveBeenCalledWith(
+      "https://upload",
+      "/tmp/doc.pdf",
+      expect.any(Number),
+      undefined,
+      expect.any(Function),
+    )
   })
 
   it("passes asset options through local MinerU parsing so images can be saved", async () => {
@@ -701,7 +719,6 @@ describe("parseWithMineru", () => {
         msg: "ok",
         data: { batch_id: "batch-1", file_urls: ["https://upload"] },
       }))
-      .mockResolvedValueOnce(new Response("", { status: 200 }))
       .mockResolvedValueOnce(jsonResponse({
         code: 0,
         msg: "ok",
@@ -737,7 +754,6 @@ describe("parseWithMineru", () => {
         msg: "ok",
         data: { batch_id: "batch-1", file_urls: ["https://upload"] },
       }))
-      .mockResolvedValueOnce(new Response("", { status: 200 }))
       .mockResolvedValueOnce(jsonResponse({
         code: 0,
         msg: "ok",
@@ -801,7 +817,6 @@ describe("parseWithMineru", () => {
         msg: "ok",
         data: { batch_id: "batch-1", file_urls: ["https://upload"] },
       }))
-      .mockResolvedValueOnce(new Response("", { status: 200 }))
       .mockResolvedValueOnce(jsonResponse({
         code: 0,
         msg: "ok",
@@ -825,7 +840,6 @@ describe("parseWithMineru", () => {
         msg: "ok",
         data: { batch_id: "batch-1", file_urls: ["https://upload"] },
       }))
-      .mockResolvedValueOnce(new Response("", { status: 200 }))
       .mockResolvedValueOnce(jsonResponse({
         code: 0,
         msg: "ok",
@@ -853,7 +867,8 @@ describe("parseWithMineru", () => {
     }, "/tmp/doc.pdf", undefined, (message) => progress.push(message)))
       .resolves.toBe("fresh markdown")
 
-    expect(fsMocks.readFileAsBase64).toHaveBeenCalledOnce()
+    expect(fsMocks.readFileAsBase64).not.toHaveBeenCalled()
+    expect(nativeUploadMocks.upload).toHaveBeenCalledOnce()
     expect(progress).toContain("MinerU download address expired; requesting a fresh address...")
     expect(directDownloadMocks.download).not.toHaveBeenCalled()
   })
@@ -865,7 +880,6 @@ describe("parseWithMineru", () => {
         msg: "ok",
         data: { batch_id: "batch-1", file_urls: ["https://upload"] },
       }))
-      .mockResolvedValueOnce(new Response("", { status: 200 }))
       .mockResolvedValueOnce(jsonResponse({
         code: 0,
         msg: "ok",
@@ -882,7 +896,7 @@ describe("parseWithMineru", () => {
     setTimeout(() => controller.abort(), 10)
 
     await expect(result).rejects.toThrow("cancelled")
-    expect(mockHttpFetch).toHaveBeenCalledTimes(3)
+    expect(mockHttpFetch).toHaveBeenCalledTimes(2)
   })
 
   it("handles official pending, waiting-file, converting, and running states before completion", async () => {
@@ -892,7 +906,6 @@ describe("parseWithMineru", () => {
         msg: "ok",
         data: { batch_id: "batch-1", file_urls: ["https://upload"] },
       }))
-      .mockResolvedValueOnce(new Response("", { status: 200 }))
       .mockResolvedValueOnce(jsonResponse({
         code: 0,
         msg: "ok",
@@ -931,7 +944,7 @@ describe("parseWithMineru", () => {
     }, "/tmp/doc.pdf", undefined, (msg) => progress.push(msg))).resolves.toBe("parsed markdown")
 
     expect(progress).toContain("Waiting for MinerU to finish...")
-    expect(mockHttpFetch).toHaveBeenCalledTimes(8)
+    expect(mockHttpFetch).toHaveBeenCalledTimes(7)
   }, 16_000)
 })
 

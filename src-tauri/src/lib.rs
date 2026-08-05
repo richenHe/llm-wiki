@@ -592,6 +592,7 @@ pub fn run() {
             app.manage(commands::claude_cli::ClaudeCliState::default());
             app.manage(commands::codex_cli::CodexCliState::default());
             app.manage(commands::file_sync::FileSyncState::default());
+            app.manage(commands::mineru_upload::MineruUploadState::default());
             app.manage(agent::session::AgentSessionStore::default());
             app.manage(agent::cancel::AgentCancellationRegistry::default());
             app.manage(CloseBehaviorState(Mutex::new("minimize".to_string())));
@@ -686,6 +687,8 @@ pub fn run() {
             commands::extract_images::render_and_save_pdf_pages_cmd,
             commands::extract_images::extract_and_save_office_images_cmd,
             commands::mineru_download::download_mineru_zip_direct_cmd,
+            commands::mineru_upload::upload_mineru_file_cmd,
+            commands::mineru_upload::cancel_mineru_upload_cmd,
             commands::file_sync::start_project_file_watcher,
             commands::file_sync::stop_project_file_watcher,
             commands::file_sync::rescan_project_files,

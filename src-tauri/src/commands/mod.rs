@@ -8,6 +8,7 @@ pub mod file_history;
 pub mod file_sync;
 pub mod fs;
 pub mod mineru_download;
+pub mod mineru_upload;
 pub mod project;
 pub mod project_maintenance;
 pub mod search;
