@@ -1229,10 +1229,52 @@ describe("autoIngest source summary paths", () => {
 
     const firstConfig = { ...useWikiStore.getState().llmConfig, model: "ingest-model-a" }
     await autoIngest(tmp.path, sourcePath, firstConfig, undefined, "project-a")
+    const previewCache = path.join(tmp.path, "raw", "sources", "project-a", ".cache", "stage-cache.pdf.txt")
+    const mineruCache = path.join(tmp.path, "raw", "sources", "project-a", ".cache", "mineru", "stage-cache.pdf.md")
+    await writeFileRaw(previewCache, "late low-fidelity preview extraction")
     const secondConfig = { ...firstConfig, model: "ingest-model-b" }
     await autoIngest(tmp.path, sourcePath, secondConfig, undefined, "project-a")
 
     expect(mockParseWithMineru).toHaveBeenCalledTimes(1)
+    await expect(fs.readFile(mineruCache, "utf8")).resolves.toBe("verified MinerU markdown")
+    await expect(fs.readFile(previewCache, "utf8")).resolves.toBe("late low-fidelity preview extraction")
+  })
+
+  it("preserves an audited video knowledge package without calling the ingest model", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    const sourceIdentity = "video-knowledge/lecture.md"
+    const sourcePath = `${tmp.path}/raw/sources/${sourceIdentity}`
+    await writeFileRaw(sourcePath, [
+      "---",
+      "title: Complete lecture",
+      "ingest_mode: curated_passthrough",
+      "coverage_status: complete",
+      "---",
+      "",
+      "# Complete lecture",
+      "",
+      "Exact detail C000001-C000010 and identifier micrograd.Value.",
+    ].join("\n"))
+
+    const written = await autoIngest(
+      tmp.path,
+      sourcePath,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "video-knowledge",
+    )
+
+    const sourceSlug = sourceSummarySlugFromIdentity(sourceIdentity)
+    const summaryPath = path.join(tmp.path, "wiki", "sources", `${sourceSlug}.md`)
+    const diagnosticPath = path.join(tmp.path, ".llm-wiki", "ingest-diagnostics", `${sourceSlug}.json`)
+    const summary = await fs.readFile(summaryPath, "utf8")
+    const diagnostic = JSON.parse(await fs.readFile(diagnosticPath, "utf8"))
+
+    expect(mockStreamChat).not.toHaveBeenCalled()
+    expect(written).toContain(`wiki/sources/${sourceSlug}.md`)
+    expect(summary).toContain("Exact detail C000001-C000010 and identifier micrograd.Value.")
+    expect(diagnostic.modelCalls).toEqual({ analysis: 0, generation: 0, repair: 0, review: 0, merge: 0 })
+    expect(diagnostic.complete).toBe(true)
   })
 
   it("does not fall back to built-in PDF extraction when MinerU is cancelled", async () => {

@@ -69,6 +69,7 @@ import {
   type StoredWrittenFile,
 } from "@/lib/ingest-generation-checkpoint"
 import { IngestNeedsAttentionError, IngestQueuePauseError } from "@/lib/ingest-errors"
+import { sourceCachePaths } from "@/lib/source-cache-paths"
 
 const LONG_SOURCE_MIN_BUDGET = 8_000
 const LONG_SOURCE_MAX_SINGLE_PASS_BUDGET = 300_000
@@ -927,9 +928,9 @@ async function autoIngestImpl(
   }
   if (isPdf && mineruCfg.enabled && mineruConfigured) {
     try {
-      const cacheDir = sp.substring(0, sp.lastIndexOf("/"))
-      const cachePath = `${cacheDir}/.cache/${fileName}.txt`
-      const cacheMetaPath = `${cachePath}.meta.json`
+      const cachePaths = sourceCachePaths(sp)
+      const cachePath = cachePaths.mineruMarkdown
+      const cacheMetaPath = cachePaths.mineruMetadata
       const extractionSignature = JSON.stringify({
         version: 2,
         source: sourceCacheMaterial,
@@ -980,7 +981,7 @@ async function autoIngestImpl(
           projectPath: pp,
           sourceSummarySlug,
         })
-        await createDirectory(`${cacheDir}/.cache`)
+        await createDirectory(cachePath.substring(0, cachePath.lastIndexOf("/")))
         await writeFile(cachePath, mineruResult.markdown)
         await writeFile(cacheMetaPath, JSON.stringify({
           extractionSignature,
@@ -1110,16 +1111,23 @@ async function autoIngestImpl(
   //
   // Failure here is never fatal — extractAndSaveSourceImages logs
   // and returns [] on any error.
-  activity.updateItem(activityId, { detail: "Extracting embedded images..." })
-  console.log(`[ingest:diag] full-pipeline branch: starting image extraction for ${sp}`)
-  let savedImages = isPdf
-    ? mineruSavedImages
-    : await extractAndSaveSourceImages(pp, sp, sourceSummarySlug)
-  const markdownImages = isPdf
+  const isCuratedSource = isCuratedPassthroughSource(sourceContent)
+  if (!isCuratedSource) {
+    activity.updateItem(activityId, { detail: "Extracting embedded images..." })
+    console.log(`[ingest:diag] full-pipeline branch: starting image extraction for ${sp}`)
+  }
+  let savedImages = isCuratedSource
+    ? []
+    : isPdf
+      ? mineruSavedImages
+      : await extractAndSaveSourceImages(pp, sp, sourceSummarySlug)
+  const markdownImages = isCuratedSource || isPdf
     ? []
     : await extractAndSaveMarkdownImages(pp, sp, sourceContent, sourceSummarySlug)
   savedImages = [...savedImages, ...markdownImages]
-  console.log(`[ingest:diag] full-pipeline branch: got ${savedImages.length} image(s)`)
+  if (!isCuratedSource) {
+    console.log(`[ingest:diag] full-pipeline branch: got ${savedImages.length} image(s)`)
+  }
   if (savedImages.length > 0) {
     console.log(
       `[ingest:images] saved ${savedImages.length} image(s) for "${sourceIdentity}" → wiki/media/${sourceSummarySlug}/`,
@@ -1165,10 +1173,12 @@ async function autoIngestImpl(
   // (which renders read_file output directly) still shows them —
   // that surface is "the source document as-is", separate from
   // "the curated wiki knowledge".
-  let enrichedSourceContent = stripWikiMediaAbsPaths(
-    pp,
-    appendSavedImageRefsForCaption(sourceContent, savedImages),
-  )
+  let enrichedSourceContent = isCuratedSource
+    ? sourceContent
+    : stripWikiMediaAbsPaths(
+        pp,
+        appendSavedImageRefsForCaption(sourceContent, savedImages),
+      )
   const mmCfg = useWikiStore.getState().multimodalConfig
   const captionLlm = resolveCaptionConfig(mmCfg, llmConfig)
   const captionUrls = savedImageCaptionUrls(pp, savedImages)
@@ -1278,8 +1288,13 @@ async function autoIngestImpl(
   let sourceContext = generationCheckpoint?.sourceContext ?? enrichedSourceContent
   let precomputedAnalysis = generationCheckpoint?.analysis ?? ""
   let longSourceCheckpointPath: string | undefined
+  const curatedPassthroughContent = buildCuratedPassthroughSourceSummary(
+    sourceIdentity,
+    enrichedSourceContent,
+    currentWikiDate(),
+  )
 
-  if (!generationCheckpoint && enrichedSourceContent.length > sourceBudget) {
+  if (!curatedPassthroughContent && !generationCheckpoint && enrichedSourceContent.length > sourceBudget) {
     const longSourcePlan = await analyzeLongSourceInChunks(
       pp,
       llmConfig,
@@ -1313,7 +1328,15 @@ async function autoIngestImpl(
       : "Step 1/2: Analyzing source...",
   })
 
-  let analysis = precomputedAnalysis
+  let analysis = curatedPassthroughContent
+    ? [
+        "## Curated Source",
+        "This source already passed its external semantic-completeness audit and must be preserved exactly.",
+        "",
+        "## Generation Contract",
+        "NO_STANDALONE_PAGES: the audited source page is the complete knowledge artifact.",
+      ].join("\n")
+    : precomputedAnalysis
 
   if (!analysis) {
     modelCalls.analysis++
@@ -1349,7 +1372,7 @@ async function autoIngestImpl(
   activity.updateItem(activityId, { detail: "Step 2/2: Generating wiki pages..." })
 
   const isLongSourceAnalysis = Boolean(longSourceCheckpointPath) || sourceContext.startsWith("# Long Source Context:")
-  let expectedKnowledgePaths = isCuratedPassthroughSource(enrichedSourceContent)
+  let expectedKnowledgePaths = curatedPassthroughContent
     ? []
     : extractExpectedKnowledgePaths(analysis, { fallbackToOutline: isLongSourceAnalysis })
 
@@ -1410,8 +1433,17 @@ async function autoIngestImpl(
   }
 
   const checkpoint = generationCheckpoint as IngestGenerationCheckpoint
+  const resumedKnowledgePages = completedGenerationCheckpointPaths(checkpoint).size
+  if (curatedPassthroughContent) {
+    storeGenerationCheckpointBlocks(checkpoint, [{
+      path: sourceSummaryPath,
+      content: curatedPassthroughContent,
+    }])
+    checkpoint.reviewCompleted = true
+    checkpoint.reviewSuggestionOutput = ""
+    await saveGenerationCheckpoint(pp, sourceSummarySlug, checkpoint)
+  }
   const checkpointCompleted = completedGenerationCheckpointPaths(checkpoint)
-  const resumedKnowledgePages = checkpointCompleted.size
   const pendingGenerationPaths = requestedGenerationPaths.filter(
     (path) => !checkpointCompleted.has(normalizePath(path).toLowerCase()),
   )
@@ -3166,11 +3198,19 @@ export function buildAnalysisPrompt(
     "## Generation Contract",
     "List only the standalone wiki pages that should actually be created or updated from this source.",
     "Use one exact path-qualified wikilink per line, such as [[concepts/example]] or [[entities/example]], followed by a short reason.",
-    "A page belongs here only when the source contains enough evidence to explain it usefully, or when an existing page needs a meaningful source-backed update.",
+    "A page belongs here only when it is relevant to the wiki purpose, central or repeatedly useful beyond this source, supported by enough source evidence to explain it usefully, and substantial enough to avoid a thin page. Existing pages still require a meaningful source-backed update.",
     "Links used elsewhere to explain relationships are context only and must not be repeated here unless this ingest should write that page.",
     "This section is the generation contract: paths omitted here will remain links but will not trigger a model generation call.",
     "- If the project schema (below) defines page types beyond entity/concept (e.g. goal, habit, reflection, finding, decision, meeting), and the source genuinely contains matching content, recommend pages of those types — name the type explicitly. Only when the source actually supports it; never invent goals/habits/journal entries that aren't in the source.",
-    "- Keep supporting details inside their parent topic page instead of creating thin pages.",
+    "- Keep supporting details inside their parent topic page instead of creating thin pages. Prefer the smallest useful page set.",
+    "",
+    "## Knowledge Triage",
+    "Classify the source's information into these four compact buckets. Do not silently discard uncertain information:",
+    "- MUST_PRESERVE: central conclusions, causal or procedural steps, definitions needed for understanding, exact numbers/dates/identifiers, evidence, conditions, exceptions, limitations, contradictions, and safety-critical details.",
+    "- COMPRESS: useful explanation, examples, and background that can be shortened without changing meaning. State what the compressed version must retain.",
+    "- SOURCE_ONLY: navigation, repeated headers/footers, advertisements, duplicated passages, formatting debris, or incidental chatter that should remain only in the raw source. Give a short reason.",
+    "- UNCERTAIN: potentially useful details whose importance cannot be established. Keep them discoverable in the source page's evidence map, but do not create a standalone page from them.",
+    "A detail is not garbage merely because it appears once or is narrow. Preserve rare thresholds, exceptions, counterexamples, and attribution when they can change an answer.",
     "",
     "Be thorough but concise. Focus on what's genuinely important.",
     "",
@@ -3233,6 +3273,13 @@ export function buildGenerationPrompt(
     "3. Concept or schema-defined typed pages for key ideas, methods, techniques, and abstractions. Prefer schema-defined directories when present; otherwise use wiki/concepts/.",
     "4. A log entry for wiki/log.md (just the new entry to append, format: ## [YYYY-MM-DD] ingest | Title)",
     "Do not generate wiki/index.md or wiki/overview.md. The application maintains aggregate navigation separately so large wikis are never rewritten through model output.",
+    "",
+    "## Source summary content",
+    "The source summary is a high-signal essence index, not a second full copy of the source.",
+    "Organize it around Core Essence, Evidence and Constraints, Knowledge Map, and Coverage Map when those sections are supported.",
+    "Preserve exact figures, identifiers, attribution, conditions, exceptions, limitations, contradictions, and important visual/table evidence that could change an answer.",
+    "Use the Coverage Map to keep meaningful sections and UNCERTAIN details discoverable in the raw source without copying all prose.",
+    "Exclude navigation, repeated headers/footers, advertisements, duplicated passages, formatting debris, and incidental chatter.",
     "",
     "## Frontmatter Rules (CRITICAL — parser is strict)",
     "",
@@ -3578,7 +3625,7 @@ function completedGenerationPaths(
   }))
 }
 
-function buildInitialPageBatchPrompt(
+export function buildInitialPageBatchPrompt(
   paths: readonly string[],
   sourceSummaryPath: string,
   sourceIdentity: string,
@@ -3598,7 +3645,16 @@ function buildInitialPageBatchPrompt(
     "Each page must contain complete YAML frontmatter with type, title, created, updated, tags, related, and sources.",
     `Every page must include ${JSON.stringify(sourceIdentity)} in frontmatter sources.`,
     includesSummary
-      ? `Write the source summary page at **${sourceSummaryPath}**. Preserve the source's full structural outline, major findings, evidence, limitations, and visual knowledge; do not turn it into a one-paragraph abstract.`
+      ? [
+          `Write the source summary page at **${sourceSummaryPath}** as a high-signal essence index, not a second full copy of the source.`,
+          "Use these body sections when the source supports them: Core Essence; Evidence and Constraints; Knowledge Map; Coverage Map.",
+          "Core Essence contains only the source's central conclusions and reusable knowledge.",
+          "Evidence and Constraints preserves exact figures, dates, identifiers, attribution, conditions, exceptions, limitations, contradictions, and important visual/table evidence that could change an answer.",
+          "Knowledge Map links the standalone pages requested by the Generation Contract.",
+          "Coverage Map lists the source's meaningful sections or topics with concise locating notes, including UNCERTAIN details, so omitted prose remains discoverable in the raw source.",
+          "Exclude navigation, repeated headers/footers, advertisements, duplicated passages, formatting debris, and incidental chatter. Never remove a rare threshold, exception, counterexample, or attribution merely because it is brief.",
+          "Keep the page compact but not skeletal; it must let a reader understand what matters and know where to reopen the source for detail.",
+        ].join(" ")
       : "Keep every requested knowledge page evidence-bound and sufficiently detailed to answer focused questions without reopening the source.",
     "Use body wikilinks when referring to another page, but do not invent pages outside the requested list.",
     "Use the exact requested paths.",
@@ -4027,6 +4083,7 @@ function buildChunkAnalysisSystemPrompt(
     "",
     "## Chunk Analysis",
     "- Concise summary of the main chunk",
+    "- Knowledge triage using MUST_PRESERVE, COMPRESS, SOURCE_ONLY, and UNCERTAIN; never silently discard uncertain details",
     "- New or updated entities",
     "- New or updated concepts",
     "- Any schema-defined page types beyond entity/concept that the main chunk genuinely supports",
@@ -4035,7 +4092,7 @@ function buildChunkAnalysisSystemPrompt(
     "",
     "## Updated Global Digest",
     "A compact document-level digest that incorporates this chunk and preserves prior cross-chunk context.",
-    "Keep this digest structured under: Summary, Entities, Concepts, Schema-Typed Candidates, Claims, Evidence, Contradictions, Open Questions, Cross-Chunk Relations, Generation Contract.",
+    "Keep this digest structured under: Summary, Knowledge Triage, Entities, Concepts, Schema-Typed Candidates, Claims, Evidence, Contradictions, Open Questions, Cross-Chunk Relations, Generation Contract.",
     "Under Generation Contract, list one exact path-qualified wikilink for every standalone page the complete document supports, for example [[concepts/example]]. Preserve useful candidates from earlier chunks unless later evidence disproves them.",
     "If the complete document genuinely supports no standalone page, write exactly: NO_STANDALONE_PAGES: followed by a short factual reason.",
     "Use schema-defined types only when the source actually supports them; never invent goals, habits, journal entries, decisions, or similar user-authored records that are not present in the source.",
@@ -4229,7 +4286,8 @@ async function finalizeLongSourceKnowledgePlan(
     "Do not re-summarize the document and do not output hidden reasoning.",
     "Return exactly one markdown section headed ## Generation Contract.",
     "List one exact path-qualified wikilink per line for every standalone page supported by the analysis, for example [[concepts/example]] or [[entities/example]], followed by a short reason.",
-    "Keep supporting details on their parent topic page instead of creating thin pages.",
+    "Include a standalone page only when it is relevant to the wiki purpose, central or repeatedly useful beyond this source, evidence-supported, and substantial enough to avoid a thin page.",
+    "Keep supporting, SOURCE_ONLY, and UNCERTAIN details on the source page or their parent topic instead of creating thin pages. Prefer the smallest useful page set.",
     "If no standalone page is justified, return exactly: ## Generation Contract followed by NO_STANDALONE_PAGES: and a short factual reason.",
     schema ? `Project schema:\n${schema}` : "",
   ].filter(Boolean).join("\n\n")

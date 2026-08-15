@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest"
 import {
   buildAnalysisPrompt,
   buildGenerationPrompt,
+  buildInitialPageBatchPrompt,
   buildPageMergeSystemPrompt,
   computeIngestGenerationMaxTokens,
   computeIngestReviewMaxTokens,
@@ -47,6 +48,27 @@ describe("buildAnalysisPrompt language directive", () => {
     expect(prompt).toContain("## Key Concepts")
     expect(prompt).toContain("## Main Arguments & Findings")
     expect(prompt).toContain("## Recommendations")
+  })
+
+  it("triages noise without silently discarding uncertain or rare details", () => {
+    const prompt = buildAnalysisPrompt("purpose", "index", "source")
+
+    expect(prompt).toContain("## Knowledge Triage")
+    expect(prompt).toContain("MUST_PRESERVE")
+    expect(prompt).toContain("COMPRESS")
+    expect(prompt).toContain("SOURCE_ONLY")
+    expect(prompt).toContain("UNCERTAIN")
+    expect(prompt).toContain("Do not silently discard uncertain information")
+    expect(prompt).toContain("rare thresholds, exceptions, counterexamples, and attribution")
+  })
+
+  it("admits only central reusable evidence-backed standalone pages", () => {
+    const prompt = buildAnalysisPrompt("purpose", "index", "source")
+
+    expect(prompt).toContain("relevant to the wiki purpose")
+    expect(prompt).toContain("central or repeatedly useful beyond this source")
+    expect(prompt).toContain("substantial enough to avoid a thin page")
+    expect(prompt).toContain("Prefer the smallest useful page set")
   })
 
   it("requires claims to stay attached to their named subject", () => {
@@ -197,6 +219,32 @@ describe("analysis + generation prompt consistency", () => {
     const generation = buildGenerationPrompt("", "", "", "f.pdf", undefined, korean)
     expect(analysis).toContain("MANDATORY OUTPUT LANGUAGE: Korean")
     expect(generation).toContain("MANDATORY OUTPUT LANGUAGE: Korean")
+  })
+})
+
+describe("bounded source-summary generation", () => {
+  it("builds an essence index while preserving evidence and a route back to raw detail", () => {
+    const prompt = buildInitialPageBatchPrompt(
+      ["wiki/sources/report.md"],
+      "wiki/sources/report.md",
+      "report.pdf",
+      {
+        schema: "",
+        purpose: "Track reliable findings",
+        analysis: "## Knowledge Triage\n- MUST_PRESERVE: threshold 42",
+        sourceContext: "# Report\nThreshold 42 applies only to cohort B.",
+        maxContextSize: 128_000,
+      },
+    )
+
+    expect(prompt).toContain("high-signal essence index")
+    expect(prompt).toContain("Core Essence")
+    expect(prompt).toContain("Evidence and Constraints")
+    expect(prompt).toContain("Knowledge Map")
+    expect(prompt).toContain("Coverage Map")
+    expect(prompt).toContain("UNCERTAIN details")
+    expect(prompt).toContain("Never remove a rare threshold, exception, counterexample, or attribution")
+    expect(prompt).toContain("reopen the source")
   })
 })
 

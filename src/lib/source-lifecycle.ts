@@ -39,6 +39,7 @@ import { isPathAllowedBySourceWatch, normalizeSourceWatchConfig } from "@/lib/so
 import { isSensitiveConfigSourceFile } from "@/lib/source-filter"
 import { naturalCompare } from "@/lib/natural-sort"
 import type { SourceWatchConfig } from "@/stores/wiki-store"
+import { sourceCachePaths } from "@/lib/source-cache-paths"
 
 export const INGESTABLE_SOURCE_EXTENSIONS = new Set([
   "md",
@@ -410,10 +411,18 @@ export async function deleteSourceFiles(
   }
 
   for (const info of sourceInfos) {
-    try {
-      await deleteFile(`${pp}/raw/sources/.cache/${info.fileName}.txt`)
-    } catch {
-      // cache file may not exist
+    const cachePaths = sourceCachePaths(info.source)
+    for (const cachePath of [
+      cachePaths.previewText,
+      cachePaths.legacyMineruMetadata,
+      cachePaths.mineruMarkdown,
+      cachePaths.mineruMetadata,
+    ]) {
+      try {
+        await deleteFile(cachePath)
+      } catch {
+        // cache file may not exist
+      }
     }
     for (const cacheKey of new Set([info.identity, info.fileName])) {
       try {
