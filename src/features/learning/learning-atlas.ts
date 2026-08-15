@@ -1,5 +1,5 @@
 import { buildWikiGraph, type GraphEdge, type GraphNode } from "@/lib/wiki-graph"
-import type { LearningContentRole, LearningNode, LearningRegion, LearningRelation } from "./learning-data"
+import type { LearningNode, LearningRegion, LearningRelation } from "./learning-data"
 
 export interface LearningAtlas {
   nodes: LearningNode[]
@@ -12,21 +12,6 @@ export interface LearningAtlas {
 const COLORS: LearningRegion["color"][] = ["violet", "blue", "cyan"]
 function glyph(title: string): string {
   return Array.from(title.trim())[0] ?? "知"
-}
-
-function contentRole(type: string): LearningContentRole {
-  if (type === "source") return "evidence"
-  if (type === "entity") return "reference"
-  if (type === "overview") return "overview"
-  return "teachable"
-}
-
-function capabilities(type: string): string[] {
-  if (type === "source") return ["核对证据", "追溯出处"]
-  if (type === "entity") return ["识别对象", "理解用途"]
-  if (type === "comparison") return ["比较判断", "说明取舍"]
-  if (type === "synthesis") return ["综合解释", "迁移应用"]
-  return ["解释知识", "迁移应用"]
 }
 
 function regionPosition(index: number, count: number) {
@@ -68,13 +53,13 @@ export function buildLearningAtlasFromGraph(graph: {
 
   rankedCommunities.forEach(([communityId, members], regionIndex) => {
     const ranked = [...members].sort((a, b) => b.linkCount - a.linkCount || a.label.localeCompare(b.label, "zh-CN"))
-    const learningOrder = [...members].sort((a, b) => b.linkCount - a.linkCount || a.label.localeCompare(b.label, "zh-CN"))
+    const learningOrder = [...members].sort((a, b) => a.path.localeCompare(b.path, "zh-CN", { numeric: true }) || a.label.localeCompare(b.label, "zh-CN"))
     const anchor = ranked[0]
     const regionId = `atlas-region-${communityId}`
     const regionTitle = anchor?.label ?? `主题 ${regionIndex + 1}`
     nodes.push({
       id: regionId,
-      title: `${regionTitle} · 知识群`,
+      title: regionTitle,
       glyph: glyph(regionTitle),
       essence: `这一知识区域包含 ${members.length} 个相互关联的概念。`,
       parentId: null,
@@ -85,7 +70,6 @@ export function buildLearningAtlasFromGraph(graph: {
       mastery: "unseen",
       position: { x: 50, y: 16 },
       kind: "region",
-      contentRole: "overview",
     })
 
     learningOrder.forEach((member) => {
@@ -98,15 +82,33 @@ export function buildLearningAtlasFromGraph(graph: {
         prerequisiteIds: [],
         source: "当前项目知识库",
         sourceDetail: member.path,
-        capabilities: capabilities(member.type),
+        capabilities: ["理解概念", "连接知识"],
         mastery: "unseen",
         position: { x: 50, y: 50 },
         kind: "concept",
         sourcePath: member.path,
         linkCount: member.linkCount,
         semanticType: member.type,
-        contentRole: contentRole(member.type),
       })
+      for (const outline of member.outline ?? []) {
+        nodes.push({
+          id: outline.id,
+          title: outline.title,
+          glyph: glyph(outline.title),
+          essence: outline.summary,
+          parentId: outline.parentId ?? member.id,
+          prerequisiteIds: [],
+          source: member.label,
+          sourceDetail: `${member.path} / ${outline.title}`,
+          capabilities: ["逐层理解"],
+          mastery: "unseen",
+          position: { x: 50, y: 50 },
+          kind: "concept",
+          sourcePath: member.path,
+          linkCount: 0,
+          semanticType: member.type,
+        })
+      }
     })
 
     regions.push({

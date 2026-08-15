@@ -19,11 +19,11 @@ export async function loadLearningProgress(projectPath: string): Promise<Learnin
   try {
     if (!hasTauriRuntime()) {
       const raw = localStorage.getItem(previewStorageKey(projectPath))
-      return raw ? parseLearningProgressSnapshot(raw) : null
+      return raw ? parseSnapshot(raw) : null
     }
     const path = statePath(projectPath)
     if (!(await fileExists(path))) return null
-    return parseLearningProgressSnapshot(await readFile(path))
+    return parseSnapshot(await readFile(path))
   } catch (error) {
     console.warn("[learning] failed to load progress", error)
     return null
@@ -39,24 +39,20 @@ export async function saveLearningProgress(projectPath: string, snapshot: Learni
   await writeFileAtomic(statePath(projectPath), contents)
 }
 
-export function parseLearningProgressSnapshot(raw: string): LearningProgressSnapshot | null {
+function parseSnapshot(raw: string): LearningProgressSnapshot | null {
   const value = JSON.parse(raw) as {
     schemaVersion?: number
     selectedNodeId?: unknown
     masteryByNode?: LearningProgressSnapshot["masteryByNode"]
     attempts?: LearningProgressSnapshot["attempts"]
-    goalsByNode?: LearningProgressSnapshot["goalsByNode"]
-    lessonCache?: LearningProgressSnapshot["lessonCache"]
     updatedAt?: unknown
   }
-  if (![1, 2, 3].includes(value.schemaVersion ?? 0) || typeof value.selectedNodeId !== "string") return null
+  if ((value.schemaVersion !== 1 && value.schemaVersion !== 2) || typeof value.selectedNodeId !== "string") return null
   return {
-    schemaVersion: 3,
+    schemaVersion: 2,
     selectedNodeId: value.selectedNodeId,
     masteryByNode: value.masteryByNode ?? {},
     attempts: Array.isArray(value.attempts) ? value.attempts : [],
-    goalsByNode: value.goalsByNode ?? {},
-    lessonCache: value.lessonCache ?? {},
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date(0).toISOString(),
   }
 }
