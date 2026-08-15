@@ -1,6 +1,6 @@
 import type { SavedImage } from "@/lib/extract-source-images"
 
-export const DOCUMENT_INGEST_PIPELINE_VERSION = 7
+export const DOCUMENT_INGEST_PIPELINE_VERSION = 8
 
 export type DocumentExtractionMode = "mineru" | "builtin" | "text"
 

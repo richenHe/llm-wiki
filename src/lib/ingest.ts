@@ -1333,6 +1333,7 @@ async function autoIngestImpl(
   // analysis used to leave complete video knowledge packages as isolated
   // source nodes with no entities, concepts, or graph relationships.
   let analysis = precomputedAnalysis
+  let analysisCompletion: StreamCompletion | undefined
 
   if (!analysis) {
     modelCalls.analysis++
@@ -1344,7 +1345,7 @@ async function autoIngestImpl(
       ],
       {
         onToken: (token) => { analysis += token },
-        onDone: () => {},
+        onDone: (completion) => { analysisCompletion = completion },
         onError: (err) => {
           activity.updateItem(activityId, { status: "error", detail: `Analysis failed: ${err.message}` })
         },
@@ -1371,6 +1372,13 @@ async function autoIngestImpl(
   let expectedKnowledgePaths = extractExpectedKnowledgePaths(analysis, {
     fallbackToOutline: isLongSourceAnalysis,
   })
+
+  if (/^(?:length|max_tokens)$/i.test(analysisCompletion?.finishReason?.trim() ?? "")) {
+    preprocessingFailures.push(
+      formatIncompleteGenerationDiagnostic("Source analysis reached the model output limit", analysisCompletion),
+    )
+    await stopBeforeKnowledgeWrite({ expectedKnowledgePages: expectedKnowledgePaths.length })
+  }
 
   if (
     isLongSourceAnalysis &&
@@ -1404,6 +1412,16 @@ async function autoIngestImpl(
   ) {
     preprocessingFailures.push(
       "Long-document analysis produced neither standalone knowledge pages nor an explicit explanation that none are needed.",
+    )
+    await stopBeforeKnowledgeWrite()
+  }
+  if (
+    !isLongSourceAnalysis &&
+    expectedKnowledgePaths.length === 0 &&
+    !hasNoStandalonePagesDeclaration(analysis)
+  ) {
+    preprocessingFailures.push(
+      "Source analysis did not provide the required Generation Contract or explicitly declare that no standalone knowledge pages are needed.",
     )
     await stopBeforeKnowledgeWrite()
   }
@@ -3159,6 +3177,18 @@ export function buildAnalysisPrompt(
     "",
     "Your analysis should cover:",
     "",
+    "## Generation Contract",
+    "Write this section first, before Key Entities or any detailed analysis, so the page plan cannot be lost if a later explanation reaches the output limit.",
+    "List only the standalone wiki pages that should actually be created or updated from this source.",
+    "Use one exact path-qualified wikilink per line, such as [[concepts/example]] or [[entities/example]], followed by a short reason.",
+    "A page belongs here when it is relevant to the wiki purpose and either central to this source or repeatedly useful beyond this source. In both cases it must have enough source evidence to explain usefully and be substantial enough to avoid a thin page. Existing pages still require a meaningful source-backed update.",
+    "Use the current wiki index only to detect existing pages and relationships. An absent or topically different index does not make a source's well-supported central subject irrelevant unless the stated wiki purpose explicitly excludes it.",
+    "Links used elsewhere to explain relationships are context only and must not be repeated here unless this ingest should write that page.",
+    "This section is the generation contract: paths omitted here will remain links but will not trigger a model generation call.",
+    "- If the project schema (below) defines page types beyond entity/concept (e.g. goal, habit, reflection, finding, decision, meeting), and the source genuinely contains matching content, recommend pages of those types — name the type explicitly. Only when the source actually supports it; never invent goals/habits/journal entries that aren't in the source.",
+    "- Keep supporting details inside their parent topic page instead of creating thin pages. Prefer the smallest useful page set.",
+    "- If no standalone page is justified, write exactly: NO_STANDALONE_PAGES: followed by a short factual reason.",
+    "",
     "## Key Entities",
     "List people, organizations, products, datasets, tools mentioned. For each:",
     "- Name and type",
@@ -3188,15 +3218,6 @@ export function buildAnalysisPrompt(
     "## Recommendations",
     "- Explain what should be emphasized, de-emphasized, or investigated further.",
     "- Do not turn every mentioned term, heading, or existing-wiki connection into a standalone page. Prefer a cohesive topic page when several supporting concepts are best understood together.",
-    "",
-    "## Generation Contract",
-    "List only the standalone wiki pages that should actually be created or updated from this source.",
-    "Use one exact path-qualified wikilink per line, such as [[concepts/example]] or [[entities/example]], followed by a short reason.",
-    "A page belongs here only when it is relevant to the wiki purpose, central or repeatedly useful beyond this source, supported by enough source evidence to explain it usefully, and substantial enough to avoid a thin page. Existing pages still require a meaningful source-backed update.",
-    "Links used elsewhere to explain relationships are context only and must not be repeated here unless this ingest should write that page.",
-    "This section is the generation contract: paths omitted here will remain links but will not trigger a model generation call.",
-    "- If the project schema (below) defines page types beyond entity/concept (e.g. goal, habit, reflection, finding, decision, meeting), and the source genuinely contains matching content, recommend pages of those types — name the type explicitly. Only when the source actually supports it; never invent goals/habits/journal entries that aren't in the source.",
-    "- Keep supporting details inside their parent topic page instead of creating thin pages. Prefer the smallest useful page set.",
     "",
     "## Knowledge Triage",
     "Classify the source's information into these four compact buckets. Do not silently discard uncertain information:",

@@ -245,7 +245,7 @@ describe("ingest scenarios (fixture-driven)", () => {
     })
 
     pendingResponses = [
-      "analysis",
+      "## Generation Contract\n- [[concepts/wrong-place]] — schema-routing fixture.",
       [
         "---FILE: wiki/sources/schema-routing.md---",
         "---",
@@ -313,7 +313,7 @@ describe("ingest scenarios (fixture-driven)", () => {
     })
 
     pendingResponses = [
-      "analysis for project A",
+      "## Generation Contract\nNO_STANDALONE_PAGES: project A fixture needs only a source summary.",
       [
         "---FILE: wiki/sources/config.md---",
         "---",
@@ -329,7 +329,7 @@ describe("ingest scenarios (fixture-driven)", () => {
         "analysis for project A",
         "---END FILE---",
       ].join("\n"),
-      "analysis for project B",
+      "## Generation Contract\nNO_STANDALONE_PAGES: project B fixture needs only a source summary.",
       [
         "---FILE: wiki/sources/config.md---",
         "---",
@@ -401,7 +401,7 @@ describe("ingest scenarios (fixture-driven)", () => {
 
     const controller = new AbortController()
     pendingResponses = [
-      "analysis",
+      "## Generation Contract\n- [[concepts/partial]] — cancellation fixture.",
       [
         "---FILE: wiki/concepts/partial.md---",
         "---",

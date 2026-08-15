@@ -44,6 +44,7 @@ describe("buildAnalysisPrompt language directive", () => {
 
   it("contains structural analysis sections", () => {
     const prompt = buildAnalysisPrompt("", "", "")
+    expect(prompt.indexOf("## Generation Contract")).toBeLessThan(prompt.indexOf("## Key Entities"))
     expect(prompt).toContain("## Key Entities")
     expect(prompt).toContain("## Key Concepts")
     expect(prompt).toContain("## Main Arguments & Findings")
@@ -66,9 +67,10 @@ describe("buildAnalysisPrompt language directive", () => {
     const prompt = buildAnalysisPrompt("purpose", "index", "source")
 
     expect(prompt).toContain("relevant to the wiki purpose")
-    expect(prompt).toContain("central or repeatedly useful beyond this source")
+    expect(prompt).toContain("either central to this source or repeatedly useful beyond this source")
     expect(prompt).toContain("substantial enough to avoid a thin page")
     expect(prompt).toContain("Prefer the smallest useful page set")
+    expect(prompt).toContain("NO_STANDALONE_PAGES")
   })
 
   it("requires claims to stay attached to their named subject", () => {

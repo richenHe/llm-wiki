@@ -19,6 +19,7 @@ let generationSuffix = ""
 let truncatedRepairResponse = ""
 let missingPageRepairResponse = ""
 let analysisOverride = ""
+let analysisFinishReason = ""
 let abortDuringReview: AbortController | null = null
 let interactiveGenerationOverride = ""
 let mergeRequestCount = 0
@@ -137,8 +138,25 @@ vi.mock("./llm-client", () => ({
       /source summary page at \*\*(wiki\/sources\/[^*]+)\*\*/,
     )
     if (!targetMatch) {
-      cb.onToken(analysisOverride || "## Analysis\nConfiguration source.")
-      cb.onDone()
+      const analysisResponse = analysisOverride || [
+        "## Generation Contract",
+        "NO_STANDALONE_PAGES: the small configuration fixture supports only its source summary.",
+        "",
+        "## Analysis",
+        "Configuration source.",
+      ].join("\n")
+      cb.onToken(analysisResponse)
+      if (analysisFinishReason) {
+        cb.onDone({
+          transport: "http-stream",
+          sawDoneMarker: true,
+          finishReason: analysisFinishReason,
+          contentChars: analysisResponse.length,
+          reasoningChars: 0,
+        })
+      } else {
+        cb.onDone()
+      }
       return
     }
 
@@ -193,6 +211,7 @@ describe("autoIngest source summary paths", () => {
     truncatedRepairResponse = ""
     missingPageRepairResponse = ""
     analysisOverride = ""
+    analysisFinishReason = ""
     abortDuringReview = null
     interactiveGenerationOverride = ""
     mergeRequestCount = 0
@@ -1360,6 +1379,76 @@ describe("autoIngest source summary paths", () => {
     expect(diagnostic.modelCalls).toEqual({ analysis: 1, generation: 0, repair: 0, review: 0, merge: 0 })
     expect(diagnostic.expectedKnowledgePages).toBe(0)
     expect(diagnostic.complete).toBe(true)
+  })
+
+  it("does not report success when a single-pass analysis omits the existing generation contract", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    const sourceIdentity = "video-knowledge/incomplete-analysis.md"
+    const sourcePath = `${tmp.path}/raw/sources/${sourceIdentity}`
+    analysisOverride = [
+      "## Key Entities",
+      "Kimi Work is the central product and is supported throughout the source.",
+      "",
+      "## Key Concepts",
+      "Goal mode is explained with a workflow and limitations.",
+    ].join("\n")
+    await writeFileRaw(sourcePath, [
+      "---",
+      "title: Incomplete analysis fixture",
+      "ingest_mode: curated_passthrough",
+      "coverage_status: complete",
+      "---",
+      "",
+      "# Incomplete analysis fixture",
+      "",
+      "Substantial audited source content.",
+    ].join("\n"))
+
+    await expect(autoIngest(
+      tmp.path,
+      sourcePath,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "video-knowledge",
+    )).rejects.toThrow("required Generation Contract")
+
+    const sourceSlug = sourceSummarySlugFromIdentity(sourceIdentity)
+    const diagnosticPath = path.join(tmp.path, ".llm-wiki", "ingest-diagnostics", `${sourceSlug}.json`)
+    const diagnostic = JSON.parse(await fs.readFile(diagnosticPath, "utf8"))
+    expect(diagnostic.modelCalls).toEqual({ analysis: 1, generation: 0, repair: 0, review: 0, merge: 0 })
+    expect(diagnostic.complete).toBe(false)
+    await expect(fs.access(path.join(tmp.path, "wiki", "sources", `${sourceSlug}.md`))).rejects.toThrow()
+  })
+
+  it("does not use a page plan from an analysis that reached the model output limit", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    const sourcePath = `${tmp.path}/raw/sources/truncated-analysis.md`
+    analysisOverride = [
+      "## Generation Contract",
+      "- [[entities/kimi-work]] — central product.",
+      "",
+      "## Key Entities",
+      "The detailed analysis was cut off here.",
+    ].join("\n")
+    analysisFinishReason = "length"
+    await writeFileRaw(sourcePath, "# Kimi Work\n\nSubstantial source content.\n")
+
+    await expect(autoIngest(
+      tmp.path,
+      sourcePath,
+      useWikiStore.getState().llmConfig,
+    )).rejects.toThrow("reached the model output limit")
+
+    const diagnosticPath = path.join(
+      tmp.path,
+      ".llm-wiki",
+      "ingest-diagnostics",
+      `${sourceSummarySlugFromIdentity("truncated-analysis.md")}.json`,
+    )
+    const diagnostic = JSON.parse(await fs.readFile(diagnosticPath, "utf8"))
+    expect(diagnostic.expectedKnowledgePages).toBe(1)
+    expect(diagnostic.modelCalls).toEqual({ analysis: 1, generation: 0, repair: 0, review: 0, merge: 0 })
+    expect(diagnostic.complete).toBe(false)
   })
 
   it("does not fall back to built-in PDF extraction when MinerU is cancelled", async () => {

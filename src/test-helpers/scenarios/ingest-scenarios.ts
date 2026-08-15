@@ -132,7 +132,7 @@ export const ingestScenarios: IngestScenario[] = [
       content:
         "# FlashAttention\n\nFlashAttention is an IO-aware exact attention algorithm.\n",
     },
-    analysisResponse: "## Key Concepts\n- FlashAttention\n\n## Generation Contract\n- No dedicated knowledge page is required.\n",
+    analysisResponse: "## Generation Contract\nNO_STANDALONE_PAGES: this fixture intentionally keeps FlashAttention on the source summary for review.\n\n## Key Concepts\n- FlashAttention\n",
     generationResponse: [
       "---FILE: wiki/sources/flash-attention.md---",
       "---",
