@@ -79,6 +79,32 @@ class GuiSuccessContractTests(unittest.TestCase):
         self.assertIn('make the visual knowledge conceptually complete in knowledge.md', text)
         self.assertIn("A reader must be able to understand the image's knowledge without opening it", text)
 
+    def test_start_button_is_explicit_authorization_and_utf8_is_required(self) -> None:
+        text = SOURCE.read_text(encoding="utf-8")
+        prompt = text[text.index("private string BuildPrompt(VideoJob job)"):]
+        prompt = prompt[:prompt.index("private async Task ValidateAndInject")]
+        self.assertIn("开始整理”已经明确确认并授权", prompt)
+        self.assertIn("不要再次列方案、等待确认或要求用户回复", prompt)
+        self.assertIn("必须显式使用 -Encoding UTF8", prompt)
+        self.assertIn("不得把中文乱码误判为文件损坏", prompt)
+
+    def test_missing_artifact_reports_confirmation_stop(self) -> None:
+        text = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("public string LastAgentMessage;", text)
+        self.assertIn("ExtractAgentMessage(line)", text)
+        self.assertIn("内部整理停在确认，没有生成知识稿；证据包已保留", text)
+        self.assertIn("失败 · 内部整理停在确认 · 已保留证据", text)
+
+    def test_failed_packages_are_not_deleted_at_batch_end_or_close(self) -> None:
+        text = SOURCE.read_text(encoding="utf-8")
+        finish = text[text.index("private async Task FinishBatch()"):]
+        finish = finish[:finish.index("private async Task StopAllAsync()")]
+        self.assertIn("jobs.All", finish)
+        self.assertIn("allCompleted ? CleanOutputRoot() : null", finish)
+        closing = text[text.index("private async void OnFormClosing"):]
+        self.assertIn("hasUnsuccessfulJob", closing)
+        self.assertIn("if (!hasUnsuccessfulJob) CleanOutputRoot();", closing)
+
 
 if __name__ == "__main__":
     unittest.main()

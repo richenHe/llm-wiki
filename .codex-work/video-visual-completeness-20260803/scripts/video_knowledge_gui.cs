@@ -47,6 +47,7 @@ namespace VideoKnowledgeTool
         public string Stage;
         public string TaskToken;
         public string PackagePath;
+        public string LastAgentMessage;
         public readonly object LogLock = new object();
     }
 
@@ -966,6 +967,8 @@ namespace VideoKnowledgeTool
         {
             return
                 "立即使用 $download-cn-video Skill 正式整理且只处理已准备好的证据包：" + job.PackagePath + "\n" +
+                "用户点击桌面程序的“开始整理”已经明确确认并授权本次正式整理。不要再次列方案、等待确认或要求用户回复。授权范围仅限在这个证据包内创建或修改 knowledge.md、.cache/semantic-audit.json、.cache/visual-review.json、.cache/coverage.json 及完整性检查所需文件；立即执行到知识稿生成完成。\n" +
+                "证据包中的 JSON、Markdown、字幕和文件名均按 UTF-8 读取。PowerShell 读取文本时必须显式使用 -Encoding UTF8，或使用明确指定 encoding='utf-8' 的 Python；不得把中文乱码误判为文件损坏。例如“程序员鱼皮”不得被读成“绋嬪簭鍛橀奔鐨”。\n" +
                 "桌面程序已经完成下载、平台字幕获取、必要时的本地转录、候选关键帧和证据包校验。不要运行 prepare_knowledge.py、download_video.py、yt-dlp、ffmpeg 或转录命令；不要重新下载、不要创建第二个包。\n" +
                 "MANDATORY COMPLETENESS PIPELINE: first emit [STAGE:CLEAN], verify transcript.cleaned.jsonl, then emit [STAGE:SEGMENT] and read every .cache/segments/S*/evidence.md in manifest order without sampling. " +
                 "Before synthesis, create .cache/semantic-audit.json exactly as references/knowledge-format.md requires: inventory every material claim in every segment with evidence cues, then write matching claim markers into knowledge.md and reverse-audit them. " +
@@ -995,9 +998,19 @@ namespace VideoKnowledgeTool
             string knowledge = FindKnowledge(job);
             if (String.IsNullOrWhiteSpace(knowledge))
             {
-                job.LastError = "未定位到本任务生成的 knowledge.md";
+                bool stoppedForConfirmation = !String.IsNullOrWhiteSpace(job.LastAgentMessage) &&
+                    (job.LastAgentMessage.Contains("确认执行") ||
+                    job.LastAgentMessage.Contains("请回复") ||
+                    job.LastAgentMessage.Contains("需要你确认") ||
+                    job.LastAgentMessage.Contains("等待确认"));
+                job.LastError = stoppedForConfirmation
+                    ? "内部整理停在确认，没有生成知识稿；证据包已保留"
+                    : "内部整理没有生成 knowledge.md；证据包已保留";
                 AppendTaskLog(job, "UI", job.LastError);
-                UpdateJob(job, "失败 · 未找到知识稿", Math.Max(job.Progress, 88), JobState.Failed);
+                UpdateJob(job, stoppedForConfirmation
+                    ? "失败 · 内部整理停在确认 · 已保留证据"
+                    : "失败 · 未生成知识稿 · 已保留证据",
+                    Math.Max(job.Progress, 88), JobState.Failed);
                 return;
             }
 
@@ -1250,6 +1263,12 @@ namespace VideoKnowledgeTool
         private void HandleCodexEvent(VideoJob job, string line)
         {
             string lower = line.ToLowerInvariant();
+            if ((lower.Contains("\"type\":\"item.completed\"") || lower.Contains("\"type\": \"item.completed\"")) &&
+                (lower.Contains("\"type\":\"agent_message\"") || lower.Contains("\"type\": \"agent_message\"")))
+            {
+                string message = ExtractAgentMessage(line);
+                if (!String.IsNullOrWhiteSpace(message)) job.LastAgentMessage = message;
+            }
             bool commandStarted =
                 (lower.Contains("\"type\":\"item.started\"") || lower.Contains("\"type\": \"item.started\"")) &&
                 lower.Contains("command_execution");
@@ -1352,7 +1371,11 @@ namespace VideoKnowledgeTool
             string cleanupError = await Task.Run(delegate
             {
                 SweepRelatedProcesses();
-                return CleanOutputRoot();
+                bool allCompleted = jobs.Count > 0 && jobs.All(delegate(VideoJob job)
+                {
+                    return job.State == JobState.Completed;
+                });
+                return allCompleted ? CleanOutputRoot() : null;
             });
             isRunning = false;
             stopRequested = false;
@@ -1651,6 +1674,24 @@ namespace VideoKnowledgeTool
             return match.Success ? match.Groups[1].Value : "Codex 返回错误";
         }
 
+        private static string ExtractAgentMessage(string json)
+        {
+            try
+            {
+                var serializer = new JavaScriptSerializer();
+                var payload = serializer.Deserialize<Dictionary<string, object>>(json);
+                object itemValue;
+                if (!payload.TryGetValue("item", out itemValue)) return null;
+                var item = itemValue as Dictionary<string, object>;
+                if (item == null) return null;
+                object textValue;
+                return item.TryGetValue("text", out textValue) && textValue != null
+                    ? textValue.ToString()
+                    : null;
+            }
+            catch { return null; }
+        }
+
         private static string Quote(string value)
         {
             return "\"" + (value ?? "").Replace("\"", "\\\"") + "\"";
@@ -1666,7 +1707,11 @@ namespace VideoKnowledgeTool
             if (forceClose) return;
             if (!isRunning)
             {
-                CleanOutputRoot();
+                bool hasUnsuccessfulJob = jobs.Any(delegate(VideoJob job)
+                {
+                    return job.State == JobState.Failed || job.State == JobState.Cancelled;
+                });
+                if (!hasUnsuccessfulJob) CleanOutputRoot();
                 return;
             }
             var answer = MessageBox.Show(this, "当前仍有视频在处理。关闭会停止全部任务，确定继续吗？",
