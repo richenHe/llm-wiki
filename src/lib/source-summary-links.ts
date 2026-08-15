@@ -15,12 +15,18 @@ export function upsertSourceKnowledgeLinks(
   sourceSummary: string,
   links: readonly SourceKnowledgeLink[],
 ): string {
-  if (links.length === 0) return sourceSummary
+  const markerPattern = new RegExp(
+    `${escapeRegExp(SOURCE_KNOWLEDGE_LINKS_START)}[\\s\\S]*?${escapeRegExp(SOURCE_KNOWLEDGE_LINKS_END)}`,
+  )
   const unique = new Map<string, SourceKnowledgeLink>()
   for (const link of links) {
     const target = link.target.trim()
     if (!target || unique.has(target.toLowerCase())) continue
     unique.set(target.toLowerCase(), { target, title: link.title.trim() || target })
+  }
+  if (unique.size === 0) {
+    if (!markerPattern.test(sourceSummary)) return sourceSummary
+    return `${sourceSummary.replace(markerPattern, "").trimEnd()}\n`
   }
   const lines = [...unique.values()]
     .sort((a, b) => a.title.localeCompare(b.title, "zh-CN"))
@@ -32,9 +38,6 @@ export function upsertSourceKnowledgeLinks(
     ...lines,
     SOURCE_KNOWLEDGE_LINKS_END,
   ].join("\n")
-  const markerPattern = new RegExp(
-    `${escapeRegExp(SOURCE_KNOWLEDGE_LINKS_START)}[\\s\\S]*?${escapeRegExp(SOURCE_KNOWLEDGE_LINKS_END)}`,
-  )
   return markerPattern.test(sourceSummary)
     ? sourceSummary.replace(markerPattern, block)
     : `${sourceSummary.trimEnd()}\n\n${block}\n`

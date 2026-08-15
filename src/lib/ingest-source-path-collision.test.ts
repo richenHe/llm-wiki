@@ -1240,10 +1240,46 @@ describe("autoIngest source summary paths", () => {
     await expect(fs.readFile(previewCache, "utf8")).resolves.toBe("late low-fidelity preview extraction")
   })
 
-  it("preserves an audited video knowledge package without calling the ingest model", async () => {
+  it("preserves an audited video source while using the shared ingest pipeline for knowledge pages", async () => {
     if (!tmp) throw new Error("missing temp project")
     const sourceIdentity = "video-knowledge/lecture.md"
     const sourcePath = `${tmp.path}/raw/sources/${sourceIdentity}`
+    analysisOverride = [
+      "## Key Entities",
+      "DeepSeek Harness is the central product in the audited lecture.",
+      "",
+      "## Key Concepts",
+      "PTC is a reusable execution mode explained with substantial evidence.",
+      "",
+      "## Generation Contract",
+      "- [[entities/deepseek-harness]] — central product with reusable evidence.",
+      "- [[concepts/ptc]] — central mechanism with a complete explanation.",
+    ].join("\n")
+    generationBatchResponder = (paths) => ({
+      output: paths.map((requestedPath) => {
+        const isEntity = requestedPath.includes("/entities/")
+        const title = isEntity ? "DeepSeek Harness" : "PTC"
+        const related = isEntity ? "ptc" : "deepseek-harness"
+        const bodyLink = isEntity ? "[[concepts/ptc|PTC]]" : "[[entities/deepseek-harness|DeepSeek Harness]]"
+        return [
+          `---FILE: ${requestedPath}---`,
+          "---",
+          `type: ${isEntity ? "entity" : "concept"}`,
+          `title: ${title}`,
+          "created: 2026-08-16",
+          "updated: 2026-08-16",
+          "tags: [video-knowledge]",
+          `related: [${related}]`,
+          `sources: [${JSON.stringify(sourceIdentity)}]`,
+          "---",
+          "",
+          `# ${title}`,
+          "",
+          `Complete evidence-bound knowledge linked to ${bodyLink}.`,
+          "---END FILE---",
+        ].join("\n")
+      }).join("\n")
+    })
     await writeFileRaw(sourcePath, [
       "---",
       "title: Complete lecture",
@@ -1270,10 +1306,59 @@ describe("autoIngest source summary paths", () => {
     const summary = await fs.readFile(summaryPath, "utf8")
     const diagnostic = JSON.parse(await fs.readFile(diagnosticPath, "utf8"))
 
-    expect(mockStreamChat).not.toHaveBeenCalled()
     expect(written).toContain(`wiki/sources/${sourceSlug}.md`)
+    expect(written).toContain("wiki/entities/deepseek-harness.md")
+    expect(written).toContain("wiki/concepts/ptc.md")
     expect(summary).toContain("Exact detail C000001-C000010 and identifier micrograd.Value.")
-    expect(diagnostic.modelCalls).toEqual({ analysis: 0, generation: 0, repair: 0, review: 0, merge: 0 })
+    expect(summary).toContain("[[entities/deepseek-harness|DeepSeek Harness]]")
+    expect(summary).toContain("[[concepts/ptc|PTC]]")
+    expect(diagnostic.modelCalls).toEqual({ analysis: 1, generation: 1, repair: 0, review: 0, merge: 0 })
+    expect(diagnostic.expectedKnowledgePages).toBe(2)
+    expect(diagnostic.complete).toBe(true)
+  })
+
+  it("still analyzes an audited source when the shared admission rules accept no standalone page", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    const sourceIdentity = "video-knowledge/brief-update.md"
+    const sourcePath = `${tmp.path}/raw/sources/${sourceIdentity}`
+    analysisOverride = [
+      "## Key Entities",
+      "Only a peripheral product mention is present.",
+      "",
+      "## Generation Contract",
+      "NO_STANDALONE_PAGES: the source has no central, reusable, substantial topic.",
+    ].join("\n")
+    await writeFileRaw(sourcePath, [
+      "---",
+      "title: Brief update",
+      "ingest_mode: curated_passthrough",
+      "coverage_status: complete",
+      "---",
+      "",
+      "# Brief update",
+      "",
+      "The audited source body remains available even without a graph page.",
+    ].join("\n"))
+
+    const written = await autoIngest(
+      tmp.path,
+      sourcePath,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "video-knowledge",
+    )
+
+    const sourceSlug = sourceSummarySlugFromIdentity(sourceIdentity)
+    const summaryPath = path.join(tmp.path, "wiki", "sources", `${sourceSlug}.md`)
+    const diagnosticPath = path.join(tmp.path, ".llm-wiki", "ingest-diagnostics", `${sourceSlug}.json`)
+    const summary = await fs.readFile(summaryPath, "utf8")
+    const diagnostic = JSON.parse(await fs.readFile(diagnosticPath, "utf8"))
+
+    expect(written).toContain(`wiki/sources/${sourceSlug}.md`)
+    expect(written.some((item) => item.startsWith("wiki/entities/") || item.startsWith("wiki/concepts/"))).toBe(false)
+    expect(summary).toContain("The audited source body remains available even without a graph page.")
+    expect(diagnostic.modelCalls).toEqual({ analysis: 1, generation: 0, repair: 0, review: 0, merge: 0 })
+    expect(diagnostic.expectedKnowledgePages).toBe(0)
     expect(diagnostic.complete).toBe(true)
   })
 

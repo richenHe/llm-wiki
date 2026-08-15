@@ -1294,7 +1294,7 @@ async function autoIngestImpl(
     currentWikiDate(),
   )
 
-  if (!curatedPassthroughContent && !generationCheckpoint && enrichedSourceContent.length > sourceBudget) {
+  if (!generationCheckpoint && enrichedSourceContent.length > sourceBudget) {
     const longSourcePlan = await analyzeLongSourceInChunks(
       pp,
       llmConfig,
@@ -1328,15 +1328,11 @@ async function autoIngestImpl(
       : "Step 1/2: Analyzing source...",
   })
 
-  let analysis = curatedPassthroughContent
-    ? [
-        "## Curated Source",
-        "This source already passed its external semantic-completeness audit and must be preserved exactly.",
-        "",
-        "## Generation Contract",
-        "NO_STANDALONE_PAGES: the audited source page is the complete knowledge artifact.",
-      ].join("\n")
-    : precomputedAnalysis
+  // Curated sources preserve their audited source page below, but knowledge
+  // admission remains shared with every other source type.  Skipping this
+  // analysis used to leave complete video knowledge packages as isolated
+  // source nodes with no entities, concepts, or graph relationships.
+  let analysis = precomputedAnalysis
 
   if (!analysis) {
     modelCalls.analysis++
@@ -1372,9 +1368,9 @@ async function autoIngestImpl(
   activity.updateItem(activityId, { detail: "Step 2/2: Generating wiki pages..." })
 
   const isLongSourceAnalysis = Boolean(longSourceCheckpointPath) || sourceContext.startsWith("# Long Source Context:")
-  let expectedKnowledgePaths = curatedPassthroughContent
-    ? []
-    : extractExpectedKnowledgePaths(analysis, { fallbackToOutline: isLongSourceAnalysis })
+  let expectedKnowledgePaths = extractExpectedKnowledgePaths(analysis, {
+    fallbackToOutline: isLongSourceAnalysis,
+  })
 
   if (
     isLongSourceAnalysis &&
@@ -1439,8 +1435,6 @@ async function autoIngestImpl(
       path: sourceSummaryPath,
       content: curatedPassthroughContent,
     }])
-    checkpoint.reviewCompleted = true
-    checkpoint.reviewSuggestionOutput = ""
     await saveGenerationCheckpoint(pp, sourceSummarySlug, checkpoint)
   }
   const checkpointCompleted = completedGenerationCheckpointPaths(checkpoint)
@@ -4586,14 +4580,13 @@ async function injectKnowledgeLinksIntoSourceSummary(
     const target = normalizePath(path).replace(/^wiki\//i, "").replace(/\.md$/i, "")
     links.push({ target, title })
   }
-  if (links.length === 0) return
   const updated = upsertSourceKnowledgeLinks(existing, links)
   for (const link of links) {
     if (!updated.includes(`[[${link.target}|`)) {
       throw new Error(`The source summary is missing its link to ${link.target}.`)
     }
   }
-  await writeFileAtomic(summaryFullPath, updated)
+  if (updated !== existing) await writeFileAtomic(summaryFullPath, updated)
 }
 
 export async function startIngest(

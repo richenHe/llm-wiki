@@ -3,6 +3,7 @@ import type { FileNode } from "@/types/wiki"
 import { buildRetrievalGraph, calculateRelevance } from "./graph-relevance"
 import { normalizePath } from "@/lib/path-utils"
 import { parseFrontmatter } from "@/lib/frontmatter"
+import { parseFrontmatterArray } from "@/lib/sources-merge"
 import Graph from "graphology"
 import louvain from "graphology-communities-louvain"
 
@@ -199,6 +200,13 @@ function extractWikilinks(content: string): string[] {
   return links
 }
 
+function extractGraphLinks(content: string): string[] {
+  return [...new Set([
+    ...extractWikilinks(content),
+    ...parseFrontmatterArray(content, "related"),
+  ].map((link) => link.trim()).filter(Boolean))]
+}
+
 function filePathToId(filePath: string, wikiRoot: string): string {
   const normalizedPath = normalizePath(filePath)
   const normalizedRoot = normalizePath(wikiRoot).replace(/\/+$/, "")
@@ -247,7 +255,7 @@ export async function buildWikiGraph(
       label,
       type: extractType(content),
       path: file.path,
-      links: extractWikilinks(content),
+      links: extractGraphLinks(content),
       summary: extractSummary(content, label),
       outline: extractOutline(content, id),
     })

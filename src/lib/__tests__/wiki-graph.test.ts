@@ -119,4 +119,25 @@ describe("buildWikiGraph frontmatter extraction", () => {
     expect(graph.nodes.map((node) => node.id).sort()).toEqual(["concepts/index", "entities/index", "overview"])
     expect(graph.edges).toContainEqual(expect.objectContaining({ source: "overview", target: "concepts/index" }))
   })
+
+  it("builds graph edges from related frontmatter without requiring a body wikilink", async () => {
+    const buildWikiGraph = await loadBuildWikiGraph()
+    mockListDirectory.mockResolvedValue([
+      { name: "entities", path: "/project/wiki/entities", is_dir: true, children: [mdFileAt("entities", "deepseek-harness.md")] },
+      { name: "concepts", path: "/project/wiki/concepts", is_dir: true, children: [mdFileAt("concepts", "ptc.md")] },
+    ])
+    mockReadFile.mockImplementation(async (path: string) => {
+      if (path.includes("deepseek-harness")) {
+        return "---\ntitle: DeepSeek Harness\ntype: entity\nrelated: [ptc]\n---\n# DeepSeek Harness\n\n核心产品页面。"
+      }
+      return "---\ntitle: PTC\ntype: concept\nrelated: []\n---\n# PTC\n\n程序化工具调用。"
+    })
+
+    const graph = await buildWikiGraph("/project")
+
+    expect(graph.edges).toContainEqual(expect.objectContaining({
+      source: "entities/deepseek-harness",
+      target: "concepts/ptc",
+    }))
+  })
 })

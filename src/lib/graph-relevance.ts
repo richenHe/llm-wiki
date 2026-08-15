@@ -1,6 +1,7 @@
 import { readFile, listDirectory } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
 import { normalizePath } from "@/lib/path-utils"
+import { parseFrontmatterArray } from "@/lib/sources-merge"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -121,6 +122,13 @@ function extractWikilinks(content: string): string[] {
   return links
 }
 
+function extractGraphLinks(content: string): string[] {
+  return [...new Set([
+    ...extractWikilinks(content),
+    ...parseFrontmatterArray(content, "related"),
+  ].map((link) => link.trim()).filter(Boolean))]
+}
+
 function resolveTarget(
   raw: string,
   nodeIds: ReadonlySet<string>,
@@ -200,7 +208,7 @@ export async function buildRetrievalGraph(
       type: fm.type,
       path: file.path,
       sources: fm.sources,
-      rawLinks: extractWikilinks(content),
+      rawLinks: extractGraphLinks(content),
       fileName: file.name,
     })
   }

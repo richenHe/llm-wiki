@@ -15,4 +15,15 @@ describe("source summary knowledge links", () => {
     expect(second.match(/llm-wiki:knowledge-links:start/g)).toHaveLength(1)
     expect(second).not.toContain("生命韧性")
   })
+
+  it("removes the application-owned section when a re-ingest accepts no knowledge pages", () => {
+    const withLinks = upsertSourceKnowledgeLinks("# 视频来源\n", [
+      { target: "concepts/ptc", title: "PTC" },
+    ])
+
+    const withoutLinks = upsertSourceKnowledgeLinks(withLinks, [])
+
+    expect(withoutLinks).toBe("# 视频来源\n")
+    expect(withoutLinks).not.toContain("llm-wiki:knowledge-links")
+  })
 })
