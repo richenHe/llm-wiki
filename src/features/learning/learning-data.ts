@@ -1,4 +1,6 @@
 export type LearningMastery = "unseen" | "started" | "understood" | "practiced" | "mastered"
+export type LearningTargetKind = "remember" | "understand" | "apply" | "judge" | "create" | "reference"
+export type LearningContentRole = "teachable" | "reference" | "evidence" | "overview"
 
 export interface LearningNode {
   id: string
@@ -17,6 +19,8 @@ export interface LearningNode {
   linkCount?: number
   semanticType?: string
   routeMnemonic?: string
+  targetKind?: LearningTargetKind
+  contentRole?: LearningContentRole
 }
 
 export type LearningRelationKind = "prerequisite" | "related"
