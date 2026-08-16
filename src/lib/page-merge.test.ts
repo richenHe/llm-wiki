@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, vi } from "vitest"
 import { mergePageContent } from "./page-merge"
+import { parseFrontmatter } from "./frontmatter"
 
 const PAGE = (fm: string, body: string) => `---\n${fm}\n---\n\n${body}`
 
@@ -93,6 +94,25 @@ describe("mergePageContent — corrected single-source replacement", () => {
     expect(out).toMatch(/related:\s*\[\s*"kept-link",\s*"new-link"\s*\]/)
     expect(backup).toHaveBeenCalledWith(existing)
     expect(merger).not.toHaveBeenCalled()
+  })
+
+  it("keeps a locked title with a colon as valid YAML", async () => {
+    const existing = PAGE(
+      'type: source\ntitle: "Source: config.yaml"\nsources: ["config.yaml"]',
+      "old source wording",
+    )
+    const incoming = PAGE(
+      'type: source\ntitle: "Source: config.yaml"\nsources: ["config.yaml"]',
+      "corrected source wording",
+    )
+
+    const out = await mergePageContent(incoming, existing, vi.fn(), {
+      ...baseOpts,
+      replaceExistingBody: true,
+    })
+
+    expect(out).toContain('title: "Source: config.yaml"')
+    expect(parseFrontmatter(out).frontmatter?.title).toBe("Source: config.yaml")
   })
 
   it("keeps normal merge behavior for a page with another source", async () => {

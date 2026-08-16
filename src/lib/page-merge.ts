@@ -227,11 +227,10 @@ function defaultToday(): string {
  * Keeps the rest of the document unchanged. Returns content
  * unchanged if it has no frontmatter at all.
  *
- * Quoting: the value is written verbatim; the caller is
- * responsible for quoting if the value contains characters that
- * would otherwise break YAML parsing (`:` etc). Today's callers
- * pass plain identifiers and ISO dates so this hasn't been an
- * issue.
+ * Values that are unsafe as YAML plain scalars are quoted before writing.
+ * This matters for locked titles such as `Source: config.yaml`: the YAML
+ * parser returns the unquoted string value, but writing that value back
+ * verbatim would turn its colon into invalid frontmatter.
  */
 function setFrontmatterScalar(
   content: string,
@@ -242,7 +241,7 @@ function setFrontmatterScalar(
   if (!fmMatch) return content
   const [, openDelim, fmBody, closeDelim] = fmMatch
   const escapedName = fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const newLine = `${fieldName}: ${value}`
+  const newLine = `${fieldName}: ${formatYamlScalar(value)}`
 
   // Only match scalar form (no `[`, no `\n  -`). Array-form fields
   // are handled by sources-merge.
@@ -254,4 +253,18 @@ function setFrontmatterScalar(
   // Field absent — append.
   const rewritten = `${fmBody}\n${newLine}`
   return `${openDelim}${rewritten}${closeDelim}${content.slice(fmMatch[0].length)}`
+}
+
+function formatYamlScalar(value: string): string {
+  const trimmed = value.trim()
+  const ambiguousScalar = /^(?:null|~|true|false|yes|no|on|off|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?|[-+]?\.inf|\.nan)$/i
+  const unsafePlainScalar = (
+    !trimmed
+    || trimmed !== value
+    || /[\r\n]/.test(value)
+    || /:\s|\s#/.test(value)
+    || /^[\-?:,\[\]{}#&*!|>'"%@`]/.test(value)
+    || ambiguousScalar.test(value)
+  )
+  return unsafePlainScalar ? JSON.stringify(value) : value
 }

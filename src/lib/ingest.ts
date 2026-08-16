@@ -42,6 +42,7 @@ import {
 import { captionMarkdownImages, loadCaptionCache } from "@/lib/image-caption-pipeline"
 import type { MultimodalConfig } from "@/stores/wiki-store"
 import { GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
+import { rebuildManagedWikiIndex } from "@/lib/wiki-index"
 import { computeContextBudget } from "@/lib/context-budget"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 import { repositoryCapsuleDirective } from "@/lib/repository-capsule-policy"
@@ -1741,7 +1742,7 @@ async function autoIngestImpl(
   const writtenPaths = writeResult.writtenPaths
   const completedInputPaths = [...writeResult.completedInputPaths]
   const writeWarnings = [...preparationWarnings, ...prewriteWarnings, ...writeResult.warnings]
-  const hardFailures = [...writeResult.hardFailures]
+  let hardFailures = [...writeResult.hardFailures]
   let unrecoveredTruncatedPaths = uniqueNormalizedPaths(
     writeResult.truncatedPaths.filter((path) =>
       !writtenPaths.some((writtenPath) => normalizePath(writtenPath) === normalizePath(path))
@@ -1976,6 +1977,16 @@ async function autoIngestImpl(
     )
   }
 
+  // A malformed first attempt can be regenerated successfully by the existing
+  // missing-page repair pass. Only failures that still lack a committed input
+  // path should keep the ingest incomplete.
+  const committedInputPathKeys = new Set(
+    completedInputPaths.map((path) => normalizePath(path).toLowerCase()),
+  )
+  hardFailures = uniqueNormalizedPaths(hardFailures).filter(
+    (path) => !committedInputPathKeys.has(normalizePath(path).toLowerCase()),
+  )
+
   // A page first seen as truncated may have been recovered by the broader
   // missing-page pass. Reconcile the original truncation list before deciding
   // whether the ingest is complete.
@@ -1993,17 +2004,6 @@ async function autoIngestImpl(
   if (incompleteExpectedPaths.length > 0) {
     writeWarnings.push(
       `Missing ${incompleteExpectedPaths.length} expected wiki page(s) after repair: ${incompleteExpectedPaths.join(", ")}`,
-    )
-  }
-
-  try {
-    if (await updateWikiIndexDeterministically(pp, writtenPaths)) {
-      writtenPaths.push("wiki/index.md")
-      onFileWritten?.("wiki/index.md")
-    }
-  } catch (err) {
-    writeWarnings.push(
-      `Deterministic index update failed: ${err instanceof Error ? err.message : String(err)}`,
     )
   }
 
@@ -2084,6 +2084,9 @@ async function autoIngestImpl(
     unrecoveredTruncatedPaths = unrecoveredTruncatedPaths.filter(
       (path) => normalizePath(path) !== normalizePath(sourceSummaryPath),
     )
+    hardFailures = hardFailures.filter(
+      (path) => normalizePath(path) !== normalizePath(sourceSummaryPath),
+    )
   }
 
   // ── Step 3.5: Append extracted images to the source-summary page ─
@@ -2107,6 +2110,19 @@ async function autoIngestImpl(
       hardFailures.push(message)
       await appendIngestWarningLog(pp, sourceIdentity, [message])
     }
+  }
+
+  // Rebuild navigation only after source fallback and knowledge-link repair,
+  // so the catalog reflects every page that actually survived this ingest.
+  try {
+    if (await rebuildManagedWikiIndex(pp, writtenPaths)) {
+      writtenPaths.push("wiki/index.md")
+      onFileWritten?.("wiki/index.md")
+    }
+  } catch (err) {
+    writeWarnings.push(
+      `Deterministic index update failed: ${err instanceof Error ? err.message : String(err)}`,
+    )
   }
 
   if (writtenPaths.length > 0) {
@@ -2386,63 +2402,6 @@ export function rewriteIngestPathFromTitleForTargetLanguage(
   if (!containsCjk(slug)) return relativePath
   const nextPath = `${dir}${slug}.md`
   return isSafeIngestPath(nextPath) ? nextPath : relativePath
-}
-
-async function updateWikiIndexDeterministically(
-  projectPath: string,
-  writtenPaths: string[],
-): Promise<boolean> {
-  const candidates = Array.from(new Set(writtenPaths.map(normalizePath))).filter((path) =>
-    path.startsWith("wiki/")
-      && path.endsWith(".md")
-      && !AGGREGATE_WIKI_PATHS.includes(path as (typeof AGGREGATE_WIKI_PATHS)[number]),
-  )
-  if (candidates.length === 0) return false
-
-  const indexPath = `${projectPath}/wiki/index.md`
-  const index = await readFile(indexPath).catch(() => "# Wiki Index\n")
-  const knownTargets = new Set(
-    Array.from(index.matchAll(/\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g))
-      .map((match) => normalizeIndexTarget(match[1])),
-  )
-  const additions: string[] = []
-  for (const path of candidates) {
-    const target = path.replace(/^wiki\//, "").replace(/\.md$/i, "")
-    if (knownTargets.has(normalizeIndexTarget(target))) continue
-    const content = await readFile(`${projectPath}/${path}`).catch(() => "")
-    const parsed = parseFrontmatter(content)
-    const title = typeof parsed.frontmatter?.title === "string"
-      ? parsed.frontmatter.title.trim()
-      : getFileName(path).replace(/\.md$/i, "")
-    additions.push(`- [[${target}]] — ${title}`)
-  }
-  if (additions.length === 0) return false
-
-  await writeFile(indexPath, updateBoundedRecentIndexSection(index, additions))
-  return true
-}
-
-function normalizeIndexTarget(target: string): string {
-  return normalizePath(target)
-    .replace(/^wiki\//i, "")
-    .replace(/\.md$/i, "")
-    .toLowerCase()
-}
-
-export function updateBoundedRecentIndexSection(index: string, additions: string[]): string {
-  const section = "## Recently Updated"
-  const lines = index.trimEnd().split("\n")
-  const start = lines.findIndex((line) => line.trim() === section)
-  const prefix = start >= 0 ? lines.slice(0, start) : lines
-  const sectionEnd = start >= 0
-    ? lines.findIndex((line, position) => position > start && /^##\s+/.test(line))
-    : -1
-  const existing = start >= 0
-    ? lines.slice(start + 1, sectionEnd >= 0 ? sectionEnd : undefined).filter((line) => /^-\s+/.test(line))
-    : []
-  const suffix = sectionEnd >= 0 ? lines.slice(sectionEnd) : []
-  const recent = Array.from(new Set([...additions, ...existing])).slice(0, 200)
-  return [...prefix, "", section, ...recent, ...(suffix.length ? ["", ...suffix] : []), ""].join("\n")
 }
 
 function isValidSourceReference(source: string, activeSourceIdentity: string): boolean {
@@ -2755,6 +2714,34 @@ function setOrAppendFrontmatterDate(payload: string, key: "created" | "updated",
   return `${payload.trimEnd()}\n${key}: ${date}`
 }
 
+/**
+ * Reject generated content pages whose metadata cannot be trusted by the
+ * reader, graph, source lifecycle, and search index. The source summary is
+ * still reconstructed by the ingest fallback when its generated block fails,
+ * while one broken knowledge page makes the ingest explicitly incomplete
+ * instead of leaving a half-readable file on disk.
+ */
+export function validateGeneratedWikiPage(content: string): string | null {
+  if (!/^---\s*\r?\n/.test(content)) return "missing opening YAML frontmatter fence"
+  const parsed = parseFrontmatter(content)
+  if (!parsed.frontmatter || !parsed.rawBlock) return "YAML frontmatter is not parseable"
+
+  const title = parsed.frontmatter.title
+  if (typeof title !== "string" || !title.trim()) {
+    return "frontmatter field title is missing or invalid"
+  }
+  const sources = parsed.frontmatter.sources
+  if (
+    !Array.isArray(sources)
+    || sources.length === 0
+    || sources.some((source) => typeof source !== "string" || !source.trim())
+  ) {
+    return "frontmatter field sources must contain at least one source"
+  }
+  if (!parsed.body.trim()) return "page body is empty"
+  return null
+}
+
 async function writeFileBlocks(
   projectPath: string,
   text: string,
@@ -2782,14 +2769,12 @@ async function writeFileBlocks(
   // canonicalization may rename the file after parsing, but callers that
   // repair a specific FILE block still need to know that request succeeded.
   const completedInputPaths: string[] = []
-  // "Hard failures" = blocks we INTENDED to write but the FS rejected
-  // (disk full, permission, OS-level errors). Distinct from soft drops
-  // (language mismatch, parse warnings, path-traversal rejections):
-  // those represent intentional content-level decisions, while hard
-  // failures are unexpected losses. The autoIngest cache layer keys
-  // off this list — any hard failure means the cache entry must NOT
-  // be written, so the next re-ingest goes through the full pipeline
-  // instead of replaying the partial result forever.
+  // "Hard failures" = blocks we INTENDED to write but could not safely
+  // commit, either because the filesystem rejected them or because their
+  // generated page metadata stayed invalid after deterministic cleanup.
+  // Content-policy drops (language mismatch, unsafe paths) remain warnings.
+  // The autoIngest cache layer keys off this list so a partial result is never
+  // replayed forever as a successful import.
   const hardFailures: string[] = []
   const projectSchemaRouting = await loadProjectWikiSchemaRouting(projectPath)
   const resumableWrites = new Map(
@@ -2850,6 +2835,9 @@ async function writeFileBlocks(
         ) {
           return false
         }
+        if (!isLogPath(finalPath) && !isListingPath(finalPath) && validateGeneratedWikiPage(plannedContent)) {
+          return false
+        }
         const isLog = isLogPath(finalPath)
         const isEntityOrSource =
           finalPath.startsWith("wiki/entities/") ||
@@ -2880,6 +2868,7 @@ async function writeFileBlocks(
     reservedWikiReferences,
   )
   let repairedReferenceCount = 0
+  const committedFinalPaths = new Set<string>()
 
   for (const { path: rawRelativePath, content: rawContent } of blocks) {
     throwIfIngestAborted(signal, activityId)
@@ -2984,6 +2973,23 @@ async function writeFileBlocks(
     content = referenceRepair.content
     repairedReferenceCount += referenceRepair.repairedCount
 
+    if (!isLogPath(relativePath) && !isListingPath(relativePath)) {
+      const validationIssue = validateGeneratedWikiPage(content)
+      if (validationIssue) {
+        const msg = `Rejected "${relativePath}" — ${validationIssue}.`
+        console.warn(`[ingest] ${msg}`)
+        warnings.push(msg)
+        hardFailures.push(relativePath)
+        continue
+      }
+    }
+
+    const finalPathKey = normalizePath(relativePath).toLowerCase()
+    if (committedFinalPaths.has(finalPathKey)) {
+      warnings.push(`Dropped duplicate generated page "${relativePath}".`)
+      continue
+    }
+
     const fullPath = `${projectPath}/${relativePath}`
     try {
       if (isLogPath(relativePath)) {
@@ -3041,6 +3047,10 @@ async function writeFileBlocks(
         const toWrite = canonicalizeSourcesField(merged, sourceFileName)
         const repairedMerge = repairIngestReferences(toWrite, pathRedirects)
         repairedReferenceCount += repairedMerge.repairedCount
+        const validationIssue = validateGeneratedWikiPage(repairedMerge.content)
+        if (validationIssue) {
+          throw new Error(`merged page failed metadata validation: ${validationIssue}`)
+        }
         await writeFile(fullPath, repairedMerge.content)
       }
       if (onFileCommitted) {
@@ -3049,6 +3059,7 @@ async function writeFileBlocks(
       }
       writtenPaths.push(relativePath)
       completedInputPaths.push(rawRelativePath)
+      committedFinalPaths.add(finalPathKey)
       onFileWritten?.(relativePath)
     } catch (err) {
       const msg = `Failed to write "${relativePath}": ${err instanceof Error ? err.message : String(err)}`
@@ -3803,7 +3814,7 @@ export function filterTruncatedFileRepairOutput(
 function uniqueNormalizedPaths(paths: readonly string[]): string[] {
   const seen = new Set<string>()
   return paths.filter((path) => {
-    const key = normalizePath(path)
+    const key = normalizePath(path).toLowerCase()
     if (seen.has(key)) return false
     seen.add(key)
     return true

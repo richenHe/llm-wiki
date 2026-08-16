@@ -24,6 +24,7 @@ const MAX_SEARCH_FILES: usize = 10_000;
 const MIN_GRAPH_RESULT_RATIO: f64 = 0.15;
 const MAX_GRAPH_RESULT_RATIO: f64 = 0.30;
 const MAX_GRAPH_SEEDS: usize = 20;
+const KNOWLEDGE_PAGE_BOOST: f64 = 1.08;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -375,6 +376,9 @@ pub async fn search_project_inner(
                 }
             }
             let relative_path = relative_to_project(&project_path, entry.path());
+            if is_structural_wiki_page(&relative_path) {
+                continue;
+            }
             let title = extract_title(
                 &content,
                 entry
@@ -496,7 +500,7 @@ fn apply_rrf_scores(
         if let Some(score) = vector_score.get(&file_stem(&result.path)).copied() {
             result.vector_score = Some(score);
         }
-        result.score = rrf;
+        result.score = rrf * retrieval_page_weight(&result.path);
     }
 }
 
@@ -643,7 +647,7 @@ fn blend_graph_results(
             title: page.title.clone(),
             snippet: format!("Graph neighbor of {related}"),
             title_match: false,
-            score: graph_score / (RRF_K + 1.0),
+            score: graph_score / (RRF_K + 1.0) * retrieval_page_weight(&page.path),
             vector_score: None,
             images: extract_image_refs(&page.content),
             content: include_content.then(|| page.content.clone()),
@@ -843,7 +847,7 @@ fn score_file(
         return None;
     }
 
-    let score = (if filename_exact {
+    let score = ((if filename_exact {
         FILENAME_EXACT_BONUS
     } else {
         0.0
@@ -853,7 +857,8 @@ fn score_file(
         0.0
     }) + content_phrase_occ as f64 * PHRASE_IN_CONTENT_PER_OCC
         + title_token_score as f64 * TITLE_TOKEN_WEIGHT
-        + content_token_score as f64 * CONTENT_TOKEN_WEIGHT;
+        + content_token_score as f64 * CONTENT_TOKEN_WEIGHT)
+        * retrieval_page_weight(&relative_to_project(project_path, path));
 
     let snippet_anchor = if content_phrase_occ > 0 {
         query_phrase.to_string()
@@ -876,6 +881,22 @@ fn score_file(
         content: include_content.then_some(content.to_string()),
         graph_related_to: Vec::new(),
     })
+}
+
+fn is_structural_wiki_page(path: &str) -> bool {
+    matches!(
+        normalize_path(path).to_lowercase().as_str(),
+        "wiki/index.md" | "wiki/log.md" | "wiki/overview.md"
+    )
+}
+
+fn retrieval_page_weight(path: &str) -> f64 {
+    let normalized = normalize_path(path).to_lowercase();
+    if normalized.starts_with("wiki/sources/") {
+        1.0
+    } else {
+        KNOWLEDGE_PAGE_BOOST
+    }
 }
 
 pub fn tokenize_query(query: &str) -> Vec<String> {
@@ -1935,10 +1956,12 @@ mod tests {
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
         assert_eq!(results[0].path, "wiki/concepts/both.md");
-        assert!((results[0].score - (1.0 / 61.0 + 1.0 / 61.0)).abs() < 0.000001);
+        assert!(
+            (results[0].score - (1.0 / 61.0 + 1.0 / 61.0) * KNOWLEDGE_PAGE_BOOST).abs() < 0.000001
+        );
         assert_eq!(results[0].vector_score, Some(0.95));
-        assert!((results[1].score - (1.0 / 62.0)).abs() < 0.000001);
-        assert!((results[2].score - (1.0 / 62.0)).abs() < 0.000001);
+        assert!((results[1].score - (1.0 / 62.0) * KNOWLEDGE_PAGE_BOOST).abs() < 0.000001);
+        assert!((results[2].score - (1.0 / 62.0) * KNOWLEDGE_PAGE_BOOST).abs() < 0.000001);
     }
 
     #[test]
@@ -2035,6 +2058,73 @@ mod tests {
         assert_eq!(out.results[0].title, "Attention");
         assert!(out.results[0].title_match);
         assert!(out.results[0].score > 100.0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn keyword_search_prefers_knowledge_pages_without_hiding_sources() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/concepts/kpt.md",
+            "---\ntype: concept\ntitle: 表达能力三来源\n---\n\n# 表达能力三来源\n\n知识、练习与天赋。",
+        );
+        write_page(
+            &root,
+            "wiki/sources/talk.md",
+            "---\ntype: source\ntitle: 表达课程视频\n---\n\n# 表达课程视频\n\n表达能力三来源包括知识、练习与天赋。罕见证据编号 S0007。",
+        );
+
+        let essence = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "表达能力三来源".into(),
+            20,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(essence.results[0].path, "wiki/concepts/kpt.md");
+
+        let evidence = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "罕见证据编号 S0007".into(),
+            20,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(evidence.results[0].path, "wiki/sources/talk.md");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn keyword_search_excludes_structural_wiki_pages() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/index.md",
+            "# Wiki Index\n\nneedle only in index",
+        );
+        write_page(&root, "wiki/log.md", "# Log\n\nneedle only in log");
+        write_page(
+            &root,
+            "wiki/overview.md",
+            "# Overview\n\nneedle only in overview",
+        );
+
+        let out = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "needle".into(),
+            20,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(out.results.is_empty());
         let _ = fs::remove_dir_all(root);
     }
 

@@ -33,7 +33,7 @@ import {
   rewriteIngestPathFromTitleForTargetLanguage,
   canonicalizeSourcesField,
   isAppManagedAggregatePath,
-  updateBoundedRecentIndexSection,
+  validateGeneratedWikiPage,
   filterTruncatedFileRepairOutput,
   savedImageCaptionUrls,
 } from "./ingest"
@@ -740,6 +740,80 @@ describe("generated ingest dates", () => {
   })
 })
 
+describe("generated page metadata validation", () => {
+  it("accepts a complete generated knowledge page", () => {
+    const content = [
+      "---",
+      "type: concept",
+      "title: 表达能力",
+      "created: 2026-08-16",
+      "updated: 2026-08-16",
+      "tags: [表达]",
+      "related: [演讲]",
+      'sources: ["video.md"]',
+      "---",
+      "# 表达能力",
+      "正文。",
+    ].join("\n")
+
+    expect(validateGeneratedWikiPage(content)).toBeNull()
+  })
+
+  it("keeps legacy-compatible pages that omit optional classification fields", () => {
+    const content = [
+      "---",
+      "title: 表达能力",
+      'sources: ["video.md"]',
+      "---",
+      "# 表达能力",
+      "正文。",
+    ].join("\n")
+
+    expect(validateGeneratedWikiPage(content)).toBeNull()
+  })
+
+  it("rejects malformed YAML instead of writing a half-readable page", () => {
+    const content = [
+      "---",
+      "type: concept",
+      "title: 保护色",
+      "created: 2026-08-16",
+      "updated: 2026-08-16",
+      'related: ["自然选择"]]"]',
+      'sources: ["book.pdf"]',
+      "---",
+      "# 保护色",
+      "正文。",
+    ].join("\n")
+
+    expect(validateGeneratedWikiPage(content)).toContain("not parseable")
+  })
+
+  it("requires source ownership and a non-empty body", () => {
+    const noSource = [
+      "---",
+      "type: concept",
+      "title: Empty",
+      "created: 2026-08-16",
+      "updated: 2026-08-16",
+      "---",
+      "# Empty",
+    ].join("\n")
+    const noBody = [
+      "---",
+      "type: concept",
+      "title: Empty",
+      "created: 2026-08-16",
+      "updated: 2026-08-16",
+      'sources: ["book.pdf"]',
+      "---",
+    ].join("\n")
+
+    expect(validateGeneratedWikiPage(noSource)).toContain("sources")
+    expect(validateGeneratedWikiPage(noBody)).toContain("body")
+  })
+})
+
 describe("rewriteIngestPathFromTitleForTargetLanguage", () => {
   it("uses the CJK page title for generated page filenames when the target language is CJK", () => {
     const content = [
@@ -809,20 +883,4 @@ describe("application-managed aggregate boundaries", () => {
     expect(isAppManagedAggregatePath("wiki/entities/index.md")).toBe(false)
   })
 
-  it("bounds recent entries and preserves following sections", () => {
-    const existing = [
-      "# Wiki Index",
-      "",
-      "## Recently Updated",
-      ...Array.from({ length: 205 }, (_, index) => `- [[old-${index}]] — Old ${index}`),
-      "",
-      "## Other",
-      "Keep me",
-    ].join("\n")
-    const result = updateBoundedRecentIndexSection(existing, ["- [[new]] — New"])
-    const recent = result.split("## Recently Updated")[1].split("## Other")[0]
-    expect(recent.match(/^- \[\[/gm)).toHaveLength(200)
-    expect(recent).toContain("[[new]]")
-    expect(result).toContain("## Other\nKeep me")
-  })
 })
