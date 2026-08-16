@@ -1,5 +1,7 @@
 import { fileExists, readFile, writeFileAtomic } from "@/commands/fs"
+import type { LearningMastery } from "./learning-data"
 import type { LearningProgressSnapshot } from "./learning-store"
+import type { TeachingAttempt } from "./teaching-types"
 
 const STATE_RELATIVE_PATH = ".llm-wiki/learning/learners/default/progress.json"
 
@@ -39,20 +41,36 @@ export async function saveLearningProgress(projectPath: string, snapshot: Learni
   await writeFileAtomic(statePath(projectPath), contents)
 }
 
-function parseSnapshot(raw: string): LearningProgressSnapshot | null {
-  const value = JSON.parse(raw) as {
-    schemaVersion?: number
-    selectedNodeId?: unknown
-    masteryByNode?: LearningProgressSnapshot["masteryByNode"]
-    attempts?: LearningProgressSnapshot["attempts"]
-    updatedAt?: unknown
+function migrateMastery(value: unknown): LearningMastery | null {
+  if (value === "unseen") return "unseen"
+  if (value === "started" || value === "understood" || value === "learning") return "learning"
+  if (value === "practiced") return "learning"
+  if (value === "applicable") return "applicable"
+  if (value === "mastered") return "learning"
+  if (value === "consolidated") return "consolidated"
+  return null
+}
+
+export function parseLearningSnapshot(raw: string): LearningProgressSnapshot | null {
+  const value = JSON.parse(raw) as Record<string, unknown>
+  if (![1, 2, 3].includes(Number(value.schemaVersion)) || typeof value.selectedNodeId !== "string") return null
+  const masteryByNode: Record<string, LearningMastery> = {}
+  if (value.masteryByNode && typeof value.masteryByNode === "object") {
+    for (const [nodeId, saved] of Object.entries(value.masteryByNode as Record<string, unknown>)) {
+      const mastery = migrateMastery(saved)
+      if (mastery) masteryByNode[nodeId] = mastery
+    }
   }
-  if ((value.schemaVersion !== 1 && value.schemaVersion !== 2) || typeof value.selectedNodeId !== "string") return null
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     selectedNodeId: value.selectedNodeId,
-    masteryByNode: value.masteryByNode ?? {},
-    attempts: Array.isArray(value.attempts) ? value.attempts : [],
+    masteryByNode,
+    attempts: Number(value.schemaVersion) === 3 && Array.isArray(value.attempts) ? value.attempts as TeachingAttempt[] : [],
+    sessionsByNode: Number(value.schemaVersion) === 3 && value.sessionsByNode && typeof value.sessionsByNode === "object" ? value.sessionsByNode as LearningProgressSnapshot["sessionsByNode"] : {},
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date(0).toISOString(),
   }
+}
+
+function parseSnapshot(raw: string): LearningProgressSnapshot | null {
+  return parseLearningSnapshot(raw)
 }

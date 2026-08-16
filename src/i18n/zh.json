@@ -423,6 +423,7 @@
       "llm": "LLM 模型",
       "embedding": "向量嵌入",
       "multimodal": "图片描述",
+      "teaching": "教学",
       "webSearch": "外部信息源",
       "network": "网络",
       "sourceWatch": "资料文件夹监控",
@@ -471,8 +472,11 @@
         "taskRouting": {
           "chat": "Chat 模型",
           "ingest": "Ingest 模型",
+          "learn": "教学讲解模型",
+          "judge": "学习判断模型",
           "activeDefault": "使用当前活跃模型",
-          "hint": "可为交互聊天和文档摄取分别选择模型；未指定时继续使用当前活跃模型。"
+          "reuseTeaching": "复用教学讲解模型",
+          "hint": "聊天、文档摄取、教学讲解和学习判断可以分别选择模型；学习判断未指定时会先复用教学模型。"
         },
       "projectOverride": {
           "enabled": "为当前项目使用独立模型",
@@ -480,7 +484,7 @@
           "selectProvider": "选择 Provider",
           "model": "项目模型",
           "modelPlaceholder": "使用 Provider 已配置的模型",
-          "hint": "启用后，当前项目的 Chat 和 Ingest 都使用这里选择的 Provider 与模型；API Key 仍保存在全局 Provider 设置中。"
+          "hint": "启用后，当前项目的聊天、文档摄取和教学都会使用这里选择的 Provider 与模型；API Key 仍保存在全局 Provider 设置中。"
         },
         "customProfiles": {
           "add": "添加自定义 Provider",
@@ -639,6 +643,18 @@
         "costPoint2": "Caption 按图片字节 SHA-256 缓存。跨文档重复的 logo / 通用图表模板只调用 ONE 次。",
         "costPoint3": "Rust 端过滤掉小于 100×100 像素的图，并限制每文档最多 500 张 —— 病态 PDF 不会无限放大费用。",
         "costPoint4": "批量 ingest 推荐用本地视觉模型（LM Studio / Ollama 跑 Qwen2.5-VL）；托管视觉 API 留给少量高价值文档。"
+      },
+      "teaching": {
+        "title": "教学与实时生图",
+        "description": "教学讲解和答案判断使用“LLM 模型”里选择的模型；这里单独配置只在确有帮助时调用的教学图片接口。资料原图和流程图不需要开启这个接口。",
+        "imageEnabled": "允许 AI 生成教学图片",
+        "imageEnabledHint": "只用于场景、空间关系或形象类比。AI 图片会标成辅助理解，不能当作资料证据。",
+        "endpoint": "图片生成接口",
+        "apiKey": "图片接口密钥",
+        "model": "图片模型",
+        "size": "图片尺寸",
+        "costHint": "同一知识内容生成后会保存在当前项目，重复打开不会再次收费。",
+        "saving": "正在保存……"
       },
       "webSearch": {
         "title": "外部信息源",

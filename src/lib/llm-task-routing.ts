@@ -9,7 +9,7 @@ import type {
 } from "@/stores/wiki-store"
 import { useWikiStore } from "@/stores/wiki-store"
 
-export type LlmTaskKind = "chat" | "ingest"
+export type LlmTaskKind = "chat" | "ingest" | "learn" | "judge"
 
 export function resolveProjectLlmConfig(
   globalConfig: LlmConfig,
@@ -52,7 +52,13 @@ export function resolveTaskLlmConfig(
   customPresets: CustomLlmPreset[] = [],
 ): LlmConfig {
   if (projectOverride?.enabled) return fallback
-  const presetId = task === "chat" ? routing.chatPresetId : routing.ingestPresetId
+  const presetId = task === "chat"
+    ? routing.chatPresetId
+    : task === "ingest"
+      ? routing.ingestPresetId
+      : task === "learn"
+        ? routing.learnPresetId
+        : routing.judgePresetId ?? routing.learnPresetId
   if (!presetId) return fallback
   const preset = findLlmPreset(presetId, customPresets)
   if (!preset) return fallback

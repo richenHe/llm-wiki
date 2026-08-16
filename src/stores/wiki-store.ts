@@ -344,6 +344,10 @@ export interface TaskModelRoutingConfig {
   chatPresetId: string | null
   /** Null keeps ingest on the globally active provider preset. */
   ingestPresetId: string | null
+  /** Null keeps teaching on the globally active provider preset. */
+  learnPresetId?: string | null
+  /** Null reuses the teaching model, then the globally active preset. */
+  judgePresetId?: string | null
 }
 
 export interface ProjectLlmOverride {
@@ -499,6 +503,8 @@ export const useWikiStore = create<WikiState>((set) => ({
   taskModelRouting: {
     chatPresetId: null,
     ingestPresetId: null,
+    learnPresetId: null,
+    judgePresetId: null,
   },
   projectLlmOverride: {
     enabled: false,

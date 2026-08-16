@@ -208,11 +208,40 @@
   box-shadow: -18px 0 48px rgb(15 23 42 / 0.1);
 }
 
+.teaching-drawer {
+  width: min(460px, calc(100% - 56px));
+}
+
+.teaching-essence {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  border: 1px solid #dbeafe;
+  border-radius: 14px;
+  background: #f8fbff;
+  padding: 14px;
+}
+
+.teaching-essence > span {
+  display: flex;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: #2563eb;
+  color: white;
+  font-size: 20px;
+  font-weight: 700;
+}
+
 @media (max-width: 900px) {
   .knowledge-path-panel { width: 220px; }
   .knowledge-route-card { left: 18px; right: 64px; width: auto; }
   .knowledge-atlas-header nav { display: none; }
   .knowledge-atlas-header { padding-inline: 12px; }
+  .teaching-drawer { width: min(430px, calc(100% - 24px)); }
 }
 
 @media (prefers-reduced-motion: reduce) {

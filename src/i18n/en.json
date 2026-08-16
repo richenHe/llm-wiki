@@ -423,6 +423,7 @@
       "llm": "LLM Models",
       "embedding": "Embeddings",
       "multimodal": "Image Captioning",
+      "teaching": "Teaching",
       "webSearch": "External Information Sources",
       "network": "Network",
       "sourceWatch": "Source Watch",
@@ -471,8 +472,11 @@
         "taskRouting": {
           "chat": "Chat model",
           "ingest": "Ingest model",
+          "learn": "Teaching model",
+          "judge": "Learning judge model",
           "activeDefault": "Use active model",
-          "hint": "Choose separate models for interactive chat and document ingest. The active model remains the fallback."
+          "reuseTeaching": "Reuse teaching model",
+          "hint": "Choose separate models for chat, ingest, teaching, and learning evaluation. Evaluation reuses the teaching model when unset."
         },
       "projectOverride": {
           "enabled": "Use a project-specific model",
@@ -480,7 +484,7 @@
           "selectProvider": "Select a provider",
           "model": "Project model",
           "modelPlaceholder": "Use the provider's configured model",
-          "hint": "When enabled, this project uses the selected provider and model for both Chat and Ingest. Credentials remain in the global provider settings."
+          "hint": "When enabled, this project uses the selected provider and model for chat, ingest, and teaching. Credentials remain in the global provider settings."
         },
         "customProfiles": {
           "add": "Add custom provider",
@@ -639,6 +643,18 @@
         "costPoint2": "Captions are cached by SHA-256 of image bytes. Duplicate logos / shared chart templates across documents only ever incur ONE call.",
         "costPoint3": "Rust-side filter drops images smaller than 100×100 px and caps at 500 images per source — pathological PDFs can't blow up the bill.",
         "costPoint4": "Prefer a local vision model (Qwen2.5-VL via LM Studio / Ollama) for bulk ingestion; reserve hosted vision APIs for one-off high-stakes documents."
+      },
+      "teaching": {
+        "title": "Teaching and live images",
+        "description": "Teaching and evaluation use the models selected under LLM Models. Configure the separate image endpoint here; source images and diagrams work without it.",
+        "imageEnabled": "Allow AI teaching images",
+        "imageEnabledHint": "Used only for scenes, spatial relationships, or useful analogies. Generated images are labeled as illustrations, never source evidence.",
+        "endpoint": "Image generation endpoint",
+        "apiKey": "Image API key",
+        "model": "Image model",
+        "size": "Image size",
+        "costHint": "Generated images are cached in the current project, so reopening the same lesson does not pay twice.",
+        "saving": "Saving…"
       },
       "webSearch": {
         "title": "External Information Sources",

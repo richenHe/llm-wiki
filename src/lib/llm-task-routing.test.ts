@@ -38,6 +38,16 @@ describe("resolveTaskLlmConfig", () => {
     })
   })
 
+  it("lets evaluation reuse the teaching model or use its own model", () => {
+    const configs = {
+      openai: { apiKey: "teach-key", model: "teacher" },
+      anthropic: { apiKey: "judge-key", model: "judge" },
+    }
+    const shared = { chatPresetId: null, ingestPresetId: null, learnPresetId: "openai", judgePresetId: null }
+    expect(resolveTaskLlmConfig("judge", fallback, configs, shared)).toMatchObject({ model: "teacher" })
+    expect(resolveTaskLlmConfig("judge", fallback, configs, { ...shared, judgePresetId: "anthropic" })).toMatchObject({ model: "judge" })
+  })
+
   it("falls back when a persisted preset id no longer exists", () => {
     expect(resolveTaskLlmConfig("ingest", fallback, {}, {
       chatPresetId: null,

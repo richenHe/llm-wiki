@@ -1,4 +1,4 @@
-export type LearningMastery = "unseen" | "started" | "understood" | "practiced" | "mastered"
+export type LearningMastery = "unseen" | "learning" | "applicable" | "mastered" | "consolidated"
 
 export interface LearningNode {
   id: string
@@ -38,13 +38,13 @@ export interface LearningRegion {
 }
 
 export const LEARNING_NODES: LearningNode[] = [
-  { id: "mechanics", title: "力学", glyph: "力", essence: "研究物体运动以及改变运动的原因。", parentId: null, prerequisiteIds: [], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章至第四章", capabilities: ["建模", "受力分析", "实验设计"], mastery: "started", position: { x: 50, y: 14 } },
-  { id: "motion", title: "运动", glyph: "运", essence: "用位置随时间的变化描述物体。", parentId: "mechanics", prerequisiteIds: [], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章 运动的描述", capabilities: ["图像分析", "物理建模"], mastery: "started", position: { x: 29, y: 39 } },
-  { id: "displacement", title: "位移", glyph: "位", essence: "从初位置指向末位置的有向线段。", parentId: "motion", prerequisiteIds: [], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章 第2节", capabilities: ["方向判断", "矢量表达"], mastery: "understood", position: { x: 22, y: 51 } },
-  { id: "velocity", title: "速度", glyph: "速", essence: "位置改变得有多快，并包含方向。", parentId: "motion", prerequisiteIds: ["displacement"], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章 第3节", capabilities: ["图像分析", "公式推导"], mastery: "understood", position: { x: 37, y: 50 } },
-  { id: "acceleration", title: "加速度", glyph: "加", essence: "速度变化得有多快。", parentId: "motion", prerequisiteIds: ["velocity"], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章 运动的描述 第3节", capabilities: ["图像分析", "公式推导", "实验设计"], mastery: "understood", position: { x: 25, y: 68 } },
-  { id: "motion-graph", title: "运动图像", glyph: "图", essence: "把运动规律转成随时间变化的图像。", parentId: "motion", prerequisiteIds: ["velocity", "acceleration"], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章 第4节", capabilities: ["图像分析", "信息转换"], mastery: "started", position: { x: 41, y: 68 } },
-  { id: "force", title: "相互作用与力", glyph: "力", essence: "力描述物体之间的相互作用。", parentId: "mechanics", prerequisiteIds: [], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第三章 相互作用——力", capabilities: ["受力分析", "实验设计"], mastery: "started", position: { x: 67, y: 38 } },
+  { id: "mechanics", title: "力学", glyph: "力", essence: "研究物体运动以及改变运动的原因。", parentId: null, prerequisiteIds: [], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章至第四章", capabilities: ["建模", "受力分析", "实验设计"], mastery: "learning", position: { x: 50, y: 14 } },
+  { id: "motion", title: "运动", glyph: "运", essence: "用位置随时间的变化描述物体。", parentId: "mechanics", prerequisiteIds: [], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章 运动的描述", capabilities: ["图像分析", "物理建模"], mastery: "learning", position: { x: 29, y: 39 } },
+  { id: "displacement", title: "位移", glyph: "位", essence: "从初位置指向末位置的有向线段。", parentId: "motion", prerequisiteIds: [], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章 第2节", capabilities: ["方向判断", "矢量表达"], mastery: "applicable", position: { x: 22, y: 51 } },
+  { id: "velocity", title: "速度", glyph: "速", essence: "位置改变得有多快，并包含方向。", parentId: "motion", prerequisiteIds: ["displacement"], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章 第3节", capabilities: ["图像分析", "公式推导"], mastery: "applicable", position: { x: 37, y: 50 } },
+  { id: "acceleration", title: "加速度", glyph: "加", essence: "速度变化得有多快。", parentId: "motion", prerequisiteIds: ["velocity"], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章 运动的描述 第3节", capabilities: ["图像分析", "公式推导", "实验设计"], mastery: "applicable", position: { x: 25, y: 68 } },
+  { id: "motion-graph", title: "运动图像", glyph: "图", essence: "把运动规律转成随时间变化的图像。", parentId: "motion", prerequisiteIds: ["velocity", "acceleration"], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第一章 第4节", capabilities: ["图像分析", "信息转换"], mastery: "learning", position: { x: 41, y: 68 } },
+  { id: "force", title: "相互作用与力", glyph: "力", essence: "力描述物体之间的相互作用。", parentId: "mechanics", prerequisiteIds: [], source: "普通高中教科书 物理 必修第一册", sourceDetail: "第三章 相互作用——力", capabilities: ["受力分析", "实验设计"], mastery: "learning", position: { x: 67, y: 38 } },
   { id: "energy", title: "能量", glyph: "能", essence: "用状态变化追踪做功与转化。", parentId: "mechanics", prerequisiteIds: ["force"], source: "普通高中教科书 物理 必修第二册", sourceDetail: "第八章 机械能守恒定律", capabilities: ["守恒分析", "公式推导"], mastery: "unseen", position: { x: 60, y: 63 } },
   { id: "momentum", title: "动量", glyph: "动", essence: "用质量与速度描述运动状态。", parentId: "mechanics", prerequisiteIds: ["velocity", "force"], source: "普通高中教科书 物理 选择性必修第一册", sourceDetail: "第一章 动量守恒定律", capabilities: ["守恒分析", "碰撞建模"], mastery: "unseen", position: { x: 38, y: 86 } },
   { id: "thermal", title: "热学", glyph: "热", essence: "研究宏观热现象与微观粒子运动。", parentId: null, prerequisiteIds: [], source: "普通高中教科书 物理 选择性必修第三册", sourceDetail: "第一章至第三章", capabilities: ["微观解释", "状态分析"], mastery: "unseen", position: { x: 50, y: 48 } },

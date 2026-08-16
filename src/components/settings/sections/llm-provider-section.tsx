@@ -114,10 +114,11 @@ export function LlmProviderSection() {
     persist(state.providerConfigs, next).catch(() => {})
   }
 
-  async function updateTaskRouting(task: "chat" | "ingest", value: string) {
+  async function updateTaskRouting(task: "chat" | "ingest" | "learn" | "judge", value: string) {
+    const key = task === "chat" ? "chatPresetId" : task === "ingest" ? "ingestPresetId" : task === "learn" ? "learnPresetId" : "judgePresetId"
     const next = {
       ...taskModelRouting,
-      [task === "chat" ? "chatPresetId" : "ingestPresetId"]: value || null,
+      [key]: value || null,
     }
     setTaskModelRouting(next)
     const { saveTaskModelRouting } = await import("@/lib/project-store")
@@ -158,6 +159,8 @@ export function LlmProviderSection() {
     const nextRouting = {
       chatPresetId: state.taskModelRouting.chatPresetId === id ? null : state.taskModelRouting.chatPresetId,
       ingestPresetId: state.taskModelRouting.ingestPresetId === id ? null : state.taskModelRouting.ingestPresetId,
+      learnPresetId: state.taskModelRouting.learnPresetId === id ? null : state.taskModelRouting.learnPresetId,
+      judgePresetId: state.taskModelRouting.judgePresetId === id ? null : state.taskModelRouting.judgePresetId,
     }
     setCustomLlmPresets(nextPresets)
     setProviderConfigs(nextConfigs)
@@ -254,6 +257,26 @@ export function LlmProviderSection() {
             console.error("Failed to save chat model routing:", error)
           })}
           fallbackLabel={t("settings.sections.llm.taskRouting.activeDefault")}
+          presets={presets}
+        />
+        <TaskModelSelect
+          id="learn-task-model"
+          label={t("settings.sections.llm.taskRouting.learn")}
+          value={taskModelRouting.learnPresetId ?? ""}
+          onChange={(value) => void updateTaskRouting("learn", value).catch((error) => {
+            console.error("Failed to save teaching model routing:", error)
+          })}
+          fallbackLabel={t("settings.sections.llm.taskRouting.activeDefault")}
+          presets={presets}
+        />
+        <TaskModelSelect
+          id="judge-task-model"
+          label={t("settings.sections.llm.taskRouting.judge")}
+          value={taskModelRouting.judgePresetId ?? ""}
+          onChange={(value) => void updateTaskRouting("judge", value).catch((error) => {
+            console.error("Failed to save judge model routing:", error)
+          })}
+          fallbackLabel={t("settings.sections.llm.taskRouting.reuseTeaching")}
           presets={presets}
         />
         <TaskModelSelect

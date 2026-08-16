@@ -4,6 +4,7 @@ import type { ApiConfig, CustomLlmPreset, GeneralConfig, LlmConfig, SearchApiCon
 import { normalizeSourceWatchConfig } from "@/lib/source-watch-config"
 import { normalizePath } from "@/lib/path-utils"
 import { DEFAULT_ZOOM_LEVEL, clampZoomLevel } from "@/stores/zoom-store"
+import { DEFAULT_TEACHING_IMAGE_CONFIG, type TeachingImageConfig } from "@/features/learning/teaching-image"
 
 const STORE_NAME = "app-state.json"
 const RECENT_PROJECTS_KEY = "recentProjects"
@@ -124,6 +125,8 @@ export async function loadTaskModelRouting(): Promise<TaskModelRoutingConfig | n
   return {
     chatPresetId: typeof saved.chatPresetId === "string" ? saved.chatPresetId : null,
     ingestPresetId: typeof saved.ingestPresetId === "string" ? saved.ingestPresetId : null,
+    learnPresetId: typeof saved.learnPresetId === "string" ? saved.learnPresetId : null,
+    judgePresetId: typeof saved.judgePresetId === "string" ? saved.judgePresetId : null,
   }
 }
 
@@ -180,6 +183,24 @@ export async function loadEmbeddingConfig(): Promise<EmbeddingConfig | null> {
 }
 
 const MULTIMODAL_KEY = "multimodalConfig"
+const TEACHING_IMAGE_KEY = "teachingImageConfig"
+
+export async function saveTeachingImageConfig(config: TeachingImageConfig): Promise<void> {
+  const store = await getStore()
+  await store.set(TEACHING_IMAGE_KEY, config)
+}
+
+export async function loadTeachingImageConfig(): Promise<TeachingImageConfig> {
+  const store = await getStore()
+  const saved = await store.get<Partial<TeachingImageConfig>>(TEACHING_IMAGE_KEY)
+  return {
+    enabled: saved?.enabled === true,
+    endpoint: typeof saved?.endpoint === "string" ? saved.endpoint : DEFAULT_TEACHING_IMAGE_CONFIG.endpoint,
+    apiKey: typeof saved?.apiKey === "string" ? saved.apiKey : "",
+    model: typeof saved?.model === "string" ? saved.model : DEFAULT_TEACHING_IMAGE_CONFIG.model,
+    size: saved?.size === "1024x1024" || saved?.size === "1024x1536" || saved?.size === "1536x1024" ? saved.size : DEFAULT_TEACHING_IMAGE_CONFIG.size,
+  }
+}
 
 export async function saveMultimodalConfig(config: MultimodalConfig): Promise<void> {
   const store = await getStore()
