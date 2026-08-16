@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -25,6 +26,7 @@ const MIN_GRAPH_RESULT_RATIO: f64 = 0.15;
 const MAX_GRAPH_RESULT_RATIO: f64 = 0.30;
 const MAX_GRAPH_SEEDS: usize = 20;
 const KNOWLEDGE_PAGE_BOOST: f64 = 1.08;
+const MANAGED_EMBEDDED_IMAGES_MARKER: &str = "<!-- llm-wiki:embedded-images -->";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -387,10 +389,14 @@ pub async fn search_project_inner(
                     .and_then(|value| value.to_str())
                     .unwrap_or_default(),
             );
+            // Keep the complete source page on disk and in include_content,
+            // but do not let hundreds of automatically appended image
+            // captions dominate keyword ranking and snippets.
+            let indexable_content = strip_managed_embedded_images_for_index(&content);
             let hit = score_file(
                 &project_path,
                 entry.path(),
-                &content,
+                indexable_content.as_ref(),
                 &effective_tokens,
                 &query_phrase,
                 &query,
@@ -888,6 +894,32 @@ fn is_structural_wiki_page(path: &str) -> bool {
         normalize_path(path).to_lowercase().as_str(),
         "wiki/index.md" | "wiki/log.md" | "wiki/overview.md"
     )
+}
+
+fn strip_managed_embedded_images_for_index(content: &str) -> Cow<'_, str> {
+    let Some(first_start) = content.find(MANAGED_EMBEDDED_IMAGES_MARKER) else {
+        return Cow::Borrowed(content);
+    };
+
+    let mut output = String::with_capacity(first_start);
+    let mut cursor = 0usize;
+    while let Some(relative_start) = content[cursor..].find(MANAGED_EMBEDDED_IMAGES_MARKER) {
+        let start = cursor + relative_start;
+        output.push_str(&content[cursor..start]);
+        let after_start = start + MANAGED_EMBEDDED_IMAGES_MARKER.len();
+        let Some(relative_end) = content[after_start..].find(MANAGED_EMBEDDED_IMAGES_MARKER) else {
+            cursor = content.len();
+            break;
+        };
+        cursor = after_start + relative_end + MANAGED_EMBEDDED_IMAGES_MARKER.len();
+        if content[cursor..].starts_with("\r\n") {
+            cursor += 2;
+        } else if content[cursor..].starts_with('\n') {
+            cursor += 1;
+        }
+    }
+    output.push_str(&content[cursor..]);
+    Cow::Owned(output)
 }
 
 fn retrieval_page_weight(path: &str) -> f64 {
@@ -1719,6 +1751,21 @@ mod tests {
     }
 
     #[test]
+    fn strips_only_the_managed_embedded_image_appendix_for_search() {
+        let content = "# 摘要\n二次函数\n<!-- llm-wiki:embedded-images -->\n![噪音说明](media/a.png)\n<!-- llm-wiki:embedded-images -->\n";
+        let stripped = strip_managed_embedded_images_for_index(content);
+        assert!(stripped.contains("二次函数"));
+        assert!(!stripped.contains("噪音说明"));
+        assert!(!stripped.contains("media/a.png"));
+    }
+
+    #[test]
+    fn preserves_user_authored_images_without_managed_markers() {
+        let content = "# 概念\n![关键图](media/key.png)";
+        assert_eq!(strip_managed_embedded_images_for_index(content), content);
+    }
+
+    #[test]
     fn extract_title_uses_frontmatter_or_heading_not_body_title_lines() {
         let with_frontmatter = "---\ntitle: Real Title\n---\n\ntitle: Body Label\n# Heading";
         assert_eq!(
@@ -2096,6 +2143,29 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(evidence.results[0].path, "wiki/sources/talk.md");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn keyword_search_ignores_terms_found_only_in_managed_image_appendix() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/sources/textbook.md",
+            "---\ntype: source\ntitle: 数学教材\n---\n\n# 摘要\n\n二次函数。\n\n<!-- llm-wiki:embedded-images -->\n![遗传变异噪音](media/page.png)\n<!-- llm-wiki:embedded-images -->\n",
+        );
+
+        let out = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "遗传变异噪音".into(),
+            20,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(out.results.is_empty());
         let _ = fs::remove_dir_all(root);
     }
 

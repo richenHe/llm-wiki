@@ -28,6 +28,7 @@ import type { FileNode } from "@/types/wiki"
 import { normalizePath } from "@/lib/path-utils"
 import { chunkMarkdown, type Chunk } from "@/lib/text-chunker"
 import { parseFrontmatter } from "@/lib/frontmatter"
+import { stripManagedEmbeddedImagesForIndex } from "@/lib/embedded-images"
 
 // ── Error surfacing ──────────────────────────────────────────────────────
 
@@ -334,7 +335,8 @@ async function preparePageEmbeddingRows(
 ): Promise<PageEmbeddingPreparation> {
   if (!cfg.enabled || !cfg.model) return { status: "empty" }
 
-  const chunks = chunkMarkdown(content, {
+  const indexableContent = stripManagedEmbeddedImagesForIndex(content)
+  const chunks = chunkMarkdown(indexableContent, {
     targetChars: cfg.maxChunkChars ?? 1000,
     overlapChars: cfg.overlapChunkChars ?? 200,
   })

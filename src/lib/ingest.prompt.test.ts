@@ -9,6 +9,8 @@ import {
   computeIngestSourceBudget,
   formatIngestWarningLogEntry,
   splitSourceIntoSemanticChunks,
+  buildChunkAnalysisSystemPrompt,
+  buildChunkAnalysisUserPrompt,
 } from "./ingest"
 import { useWikiStore } from "@/stores/wiki-store"
 
@@ -200,6 +202,34 @@ describe("buildGenerationPrompt language directive", () => {
     const prompt = buildGenerationPrompt("", "", "", "repo-capsule.md", undefined, source)
     expect(prompt).toContain("Keep important evidence IDs and commit-pinned URLs")
     expect(prompt).toContain("Do not invent authors")
+  })
+})
+
+describe("long-source wiki-index placement", () => {
+  it("does not repeat the full wiki index in every chunk system prompt", () => {
+    const prompt = buildChunkAnalysisSystemPrompt("purpose", "schema", "source")
+    expect(prompt).not.toContain("## Current Wiki Index")
+  })
+
+  it("supplies the wiki index only to the final chunk for whole-document deduplication", () => {
+    const chunk = {
+      id: "chunk-3",
+      index: 3,
+      total: 3,
+      main: "final chapter",
+      overlapBefore: "",
+      headingPath: "Chapter 3",
+    }
+    const prompt = buildChunkAnalysisUserPrompt(
+      "book.pdf",
+      undefined,
+      chunk,
+      "prior digest",
+      "- [[concepts/existing]] — Existing",
+    )
+    expect(prompt).toContain("## Current Wiki Index")
+    expect(prompt).toContain("final whole-document page plan")
+    expect(prompt).toContain("[[concepts/existing]]")
   })
 })
 

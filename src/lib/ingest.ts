@@ -29,6 +29,10 @@ import { parseSources, writeSources } from "@/lib/sources-merge"
 import { checkIngestCache, saveIngestCache } from "@/lib/ingest-cache"
 import { sanitizeIngestedFileContent } from "@/lib/ingest-sanitize"
 import { mergePageContent, type MergeFn } from "@/lib/page-merge"
+import {
+  buildSourceEvidenceIndex,
+  evaluateCrossSourceMerge,
+} from "@/lib/ingest-merge-boundary"
 import { withProjectLock } from "@/lib/project-mutex"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { makeQuerySlug } from "@/lib/wiki-filename"
@@ -2738,6 +2742,15 @@ export function validateGeneratedWikiPage(content: string): string | null {
   ) {
     return "frontmatter field sources must contain at least one source"
   }
+  for (const field of ["tags", "related"] as const) {
+    const value = parsed.frontmatter[field]
+    if (
+      value !== undefined
+      && (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim()))
+    ) {
+      return `frontmatter field ${field} must be a flat string array`
+    }
+  }
   if (!parsed.body.trim()) return "page body is empty"
   return null
 }
@@ -2777,6 +2790,9 @@ async function writeFileBlocks(
   // replayed forever as a successful import.
   const hardFailures: string[] = []
   const projectSchemaRouting = await loadProjectWikiSchemaRouting(projectPath)
+  // One normalized copy is shared by every collision check in this write
+  // pass. A 131-page PDF is therefore normalized once, not once per page.
+  const sourceEvidence = buildSourceEvidenceIndex(sourceContent)
   const resumableWrites = new Map(
     (resumeWrittenFiles ?? []).map((entry) => [normalizePath(entry.inputPath).toLowerCase(), entry]),
   )
@@ -3030,6 +3046,26 @@ async function writeFileBlocks(
         const replaceExistingBody = Boolean(
           existing && isOwnedOnlyBySource(existing, sourceFileName),
         )
+        if (existing && !replaceExistingBody) {
+          const boundary = evaluateCrossSourceMerge({
+            existingContent: existing,
+            incomingSourceIdentity: sourceFileName,
+            pagePath: relativePath,
+            evidence: sourceEvidence,
+          })
+          if (!boundary.allow) {
+            const msg = `Skipped unsafe cross-source merge for "${relativePath}" — ${boundary.reason}. The existing page was kept unchanged.`
+            console.warn(`[ingest] ${msg}`)
+            warnings.push(msg)
+            // Treat the generated block as deliberately handled so bounded
+            // repair does not spend more model calls recreating the same
+            // unsupported page. Do not add it to writtenPaths: this source
+            // must not link to or claim ownership of the unrelated old page.
+            completedInputPaths.push(rawRelativePath)
+            committedFinalPaths.add(finalPathKey)
+            continue
+          }
+        }
         const merged = await mergePageContent(
           content,
           existing || null,
@@ -4089,10 +4125,9 @@ function extractMarkedSection(raw: string, heading: string): string {
   return re.exec(raw)?.[1]?.trim() ?? ""
 }
 
-function buildChunkAnalysisSystemPrompt(
+export function buildChunkAnalysisSystemPrompt(
   purpose: string,
   schema: string,
-  index: string,
   sourceContent: string,
 ): string {
   return [
@@ -4126,15 +4161,15 @@ function buildChunkAnalysisSystemPrompt(
     "Stable project context follows. It changes rarely and should be treated as background:",
     purpose ? `## Wiki Purpose\n${purpose}` : "",
     schema ? `## Wiki Schema\n${schema}` : "",
-    index ? `## Current Wiki Index\n${trimLongText(index, 40_000)}` : "",
   ].filter(Boolean).join("\n")
 }
 
-function buildChunkAnalysisUserPrompt(
+export function buildChunkAnalysisUserPrompt(
   sourceIdentity: string,
   folderContext: string | undefined,
   chunk: SourceChunk,
   globalDigest: string,
+  finalWikiIndex: string = "",
 ): string {
   return [
     `Source file: ${sourceIdentity}`,
@@ -4150,6 +4185,14 @@ function buildChunkAnalysisUserPrompt(
     "## MAIN CHUNK TO ANALYZE",
     chunk.main,
     "",
+    finalWikiIndex
+      ? [
+          "## Current Wiki Index (final whole-document page plan only)",
+          "This is the final chunk. Reconcile the complete digest's Generation Contract against this index now: reuse a matching existing page only when the source supports that exact topic, and keep topically different pages separate.",
+          trimLongText(finalWikiIndex, 40_000),
+          "",
+        ].join("\n")
+      : "",
     "Return only the two requested sections. Do not repeat overlap-only facts unless the main chunk supports them.",
   ].filter(Boolean).join("\n")
 }
@@ -4177,7 +4220,13 @@ async function analyzeLongSourceInChunks(
   }
 
   const activity = useActivityStore.getState()
-  const systemPrompt = buildChunkAnalysisSystemPrompt(purpose, schema, index, sourceContent)
+  // The wiki index is intentionally absent from the fixed system prompt.
+  // Repeating the same 170+ page catalog for every source chunk wastes input
+  // tokens and can pull an unrelated old page into every local analysis. It is
+  // supplied once, on the final chunk, where the whole-document page plan is
+  // reconciled. Keep this placement unless a measured regression proves that
+  // an earlier chunk needs catalog-level deduplication.
+  const systemPrompt = buildChunkAnalysisSystemPrompt(purpose, schema, sourceContent)
   const sourceHash = hashTextHex(sourceContent)
   const checkpointPath = longSourceCheckpointPath(projectPath, sourceSummarySlug, sourceHash)
   const checkpointParams = {
@@ -4225,6 +4274,7 @@ async function analyzeLongSourceInChunks(
                 folderContext,
                 chunk,
                 trimLongText(globalDigest, LONG_SOURCE_DIGEST_MAX),
+                chunk.index === chunk.total ? index : "",
               ),
             },
           ],

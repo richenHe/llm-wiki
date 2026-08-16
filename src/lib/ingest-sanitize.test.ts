@@ -88,23 +88,22 @@ describe("sanitizeIngestedFileContent", () => {
     const input =
       "---\ntype: entity\nrelated: [[a]], [[b]], [[c]]\n---\n\nbody"
     expect(sanitizeIngestedFileContent(input)).toBe(
-      `---\ntype: entity\nrelated: ["[[a]]", "[[b]]", "[[c]]"]\n---\n\nbody`,
+      `---\ntype: entity\nrelated: [a, b, c]\n---\n\nbody`,
     )
   })
 
   it("repairs a wikilink list without corrupting CRLF frontmatter", () => {
     const input = "---\r\ntype: entity\r\nrelated: [[a]], [[b]]\r\n---\r\n# Body\r\n"
     expect(sanitizeIngestedFileContent(input)).toBe(
-      "---\r\ntype: entity\r\nrelated: [\"[[a]]\", \"[[b]]\"]\r\n---\r\n# Body\r\n",
+      "---\r\ntype: entity\r\nrelated: [a, b]\r\n---\r\n# Body\r\n",
     )
   })
 
-  it("doesn't touch a single `key: [[a]]` (not a list — leave the user's intent alone)", () => {
+  it("normalizes a single nested related value into a graph-readable slug", () => {
     const input = `---\nrelated: [[a]]\n---\nbody`
-    // Single-element nested-array form is rare but legal YAML;
-    // we only repair the multi-comma form which is unambiguously
-    // an LLM mistake.
-    expect(sanitizeIngestedFileContent(input)).toBe(input)
+    expect(sanitizeIngestedFileContent(input)).toBe(
+      `---\nrelated: [a]\n---\nbody`,
+    )
   })
 
   it("doesn't touch wikilink-style text that appears in the body", () => {
@@ -114,12 +113,48 @@ describe("sanitizeIngestedFileContent", () => {
     expect(sanitizeIngestedFileContent(input)).toBe(input)
   })
 
+  it("flattens nested related arrays and converts paths to bare slugs", () => {
+    const input = `---
+type: concept
+title: 二次函数
+sources: [数学教材.pdf]
+tags: [数学]
+related: [["wiki/concepts/抛物线.md"], ["wiki/concepts/顶点.md"]]
+---
+
+# 二次函数
+
+正文`
+
+    const output = sanitizeIngestedFileContent(input)
+    expect(output).toContain("related:")
+    expect(output).toContain("抛物线")
+    expect(output).toContain("顶点")
+    expect(output).not.toContain("wiki/concepts/")
+    expect(output).not.toContain('[["')
+  })
+
+  it("normalizes flat related path values without changing body links", () => {
+    const input = `---
+type: concept
+title: 二次函数
+sources: [数学教材.pdf]
+related: [wiki/concepts/抛物线.md, "[[wiki/concepts/顶点.md]]"]
+---
+
+参见 [[wiki/concepts/抛物线.md]]。`
+
+    const output = sanitizeIngestedFileContent(input)
+    expect(output).toMatch(/related:\s*\[[^\n]*抛物线[^\n]*顶点[^\n]*\]/)
+    expect(output).toContain("参见 [[wiki/concepts/抛物线.md]]。")
+  })
+
   it("composes all three repairs on a real-corpus-shaped input", () => {
     const input =
       "```yaml\nfrontmatter:\n---\ntype: entity\nrelated: [[a]], [[b]]\n---\n\n# Body\n```"
     const out = sanitizeIngestedFileContent(input)
     expect(out).toBe(
-      `---\ntype: entity\nrelated: ["[[a]]", "[[b]]"]\n---\n\n# Body`,
+      `---\ntype: entity\nrelated: [a, b]\n---\n\n# Body`,
     )
   })
 })

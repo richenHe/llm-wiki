@@ -1261,6 +1261,28 @@ describe("embedPage", () => {
     expect(emb[0]).not.toBe(0.1)
   })
 
+  it("does not embed the managed source-image appendix", async () => {
+    mockEmbeddingFetchInvoke.mockImplementation(async (args) => {
+      const { text } = args as { text: string }
+      expect(text).toContain("二次函数核心摘要")
+      expect(text).not.toContain("遗传变异噪音")
+      expect(text).not.toContain("media/page.png")
+      return [0.1, 0.2]
+    })
+
+    await embedPage(
+      "/tmp/p",
+      "数学教材",
+      "数学教材",
+      "# 摘要\n\n二次函数核心摘要。\n\n<!-- llm-wiki:embedded-images -->\n![遗传变异噪音](media/page.png)\n<!-- llm-wiki:embedded-images -->\n",
+      cfg,
+    )
+
+    const upsert = mockInvoke.mock.calls.find(([command]) => command === "vector_upsert_chunks")
+    expect(upsert).toBeDefined()
+    expect(JSON.stringify(upsert?.[1])).not.toContain("遗传变异噪音")
+  })
+
   it("optimizes periodically for incremental page embeddings", async () => {
     mockHttpFetch.mockImplementation(async () => okResponse([0.1, 0.2, 0.3]))
 

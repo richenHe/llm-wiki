@@ -1,3 +1,5 @@
+import yaml from "js-yaml"
+
 /**
  * Clean up an LLM-generated wiki page body before it hits disk.
  *
@@ -85,7 +87,89 @@ export function sanitizeIngestedFileContent(content: string): string {
   // link transform applied at read time.
   cleaned = repairWikilinkListsInFrontmatter(cleaned)
 
+  // (4) Canonicalize model-emitted metadata arrays. Small models sometimes
+  // emit `related: [["wiki/concepts/foo.md"]]`: valid YAML, but the nested
+  // arrays become opaque JSON strings in the graph reader. Flatten only the
+  // generated array fields and convert related paths to the bare slugs the
+  // resolver expects; body wikilinks and source filenames stay untouched.
+  cleaned = canonicalizeGeneratedFrontmatterArrays(cleaned)
+
   return cleaned
+}
+
+function canonicalizeGeneratedFrontmatterArrays(content: string): string {
+  const fmRe = /^(---[ \t]*(\r?\n))([\s\S]*?)(\r?\n---[ \t]*(?:\r?\n|$))/
+  const match = content.match(fmRe)
+  if (!match) return content
+
+  let parsed: unknown
+  try {
+    parsed = yaml.load(match[3], { schema: yaml.JSON_SCHEMA })
+  } catch {
+    return content
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return content
+
+  const record = parsed as Record<string, unknown>
+  let changed = false
+  for (const field of ["sources", "tags", "related"] as const) {
+    if (!(field in record)) continue
+    const flattened = flattenStringArray(record[field])
+    if (!flattened) continue
+    const normalized = field === "related"
+      ? flattened.map(normalizeRelatedReference).filter(Boolean)
+      : flattened.map((value) => value.trim()).filter(Boolean)
+    const deduped = dedupeCaseInsensitive(normalized)
+    if (JSON.stringify(record[field]) !== JSON.stringify(deduped)) {
+      record[field] = deduped
+      changed = true
+    }
+  }
+  if (!changed) return content
+
+  const newline = match[2]
+  const dumped = yaml.dump(record, {
+    schema: yaml.JSON_SCHEMA,
+    noRefs: true,
+    lineWidth: -1,
+    flowLevel: 1,
+  }).trimEnd().replace(/\n/g, newline)
+  return `${match[1]}${dumped}${match[4]}${content.slice(match[0].length)}`
+}
+
+function flattenStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  const output: string[] = []
+  const visit = (entry: unknown): boolean => {
+    if (typeof entry === "string") {
+      output.push(entry)
+      return true
+    }
+    if (!Array.isArray(entry)) return false
+    return entry.every(visit)
+  }
+  return value.every(visit) ? output : null
+}
+
+function normalizeRelatedReference(value: string): string {
+  let normalized = value.trim()
+  const wikilink = /^\[\[([\s\S]*?)\]\]$/.exec(normalized)
+  if (wikilink) normalized = wikilink[1].split("|", 1)[0]
+  normalized = normalized.split("#", 1)[0].replace(/\\/g, "/")
+  normalized = normalized.replace(/^\.\//, "").replace(/^wiki\//i, "")
+  const slash = normalized.lastIndexOf("/")
+  if (slash >= 0) normalized = normalized.slice(slash + 1)
+  return normalized.replace(/\.md$/i, "").trim()
+}
+
+function dedupeCaseInsensitive(values: string[]): string[] {
+  const seen = new Set<string>()
+  return values.filter((value) => {
+    const key = value.toLocaleLowerCase()
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 /** Top-level fence wrapper. Removes the open + matching close fence lines. */
