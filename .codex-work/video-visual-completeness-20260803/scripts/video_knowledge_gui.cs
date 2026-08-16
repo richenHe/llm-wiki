@@ -580,8 +580,15 @@ namespace VideoKnowledgeTool
 
         private List<string> ParseLinks(string value)
         {
-            return Regex.Split(value ?? "", @"[,，;\r\n]+")
-                .Select(delegate(string item) { return item.Trim(); })
+            MatchCollection matches = Regex.Matches(
+                value ?? "",
+                @"https?://(?:(?:www\.)?douyin\.com|v\.douyin\.com|(?:www\.)?bilibili\.com|b23\.tv|(?:(?:www|m|music)\.)?youtube\.com|youtu\.be)/[^\s<>""'，,;；]+",
+                RegexOptions.IgnoreCase);
+            return matches.Cast<Match>()
+                .Select(delegate(Match match)
+                {
+                    return match.Value.TrimEnd('，', '。', '！', '？', '、', '；', '：', ',', '!', '?', ';', ':', ')', ']', '}');
+                })
                 .Where(delegate(string item) { return item.Length > 0; })
                 .Distinct(StringComparer.Ordinal)
                 .ToList();

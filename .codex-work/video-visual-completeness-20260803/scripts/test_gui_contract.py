@@ -42,6 +42,17 @@ class GuiSuccessContractTests(unittest.TestCase):
         text = SOURCE.read_text(encoding="utf-8")
         self.assertIn('"--package-suffix", "task" + job.Number.ToString("00")', text)
 
+    def test_share_text_is_split_by_supported_urls_not_punctuation(self) -> None:
+        text = SOURCE.read_text(encoding="utf-8")
+        parser = text[text.index("private List<string> ParseLinks(string value)"):]
+        parser = parser[:parser.index("private static string CanonicalLinkKey")]
+        self.assertIn("MatchCollection matches = Regex.Matches", parser)
+        self.assertIn("v\\.douyin\\.com", parser)
+        self.assertIn("b23\\.tv", parser)
+        self.assertIn("youtu\\.be", parser)
+        self.assertNotIn("Regex.Split", parser)
+        self.assertNotIn('@"[,，;', parser)
+
     def test_exact_prepared_package_path_is_used_before_directory_scanning(self) -> None:
         text = SOURCE.read_text(encoding="utf-8")
         find_knowledge = text[text.index("private string FindKnowledge(VideoJob job)"):]
