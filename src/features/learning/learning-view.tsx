@@ -86,13 +86,13 @@ function PathTree({
   onSelect,
 }: {
   nodes: readonly LearningNode[]
-  selectedNodeId: string
+  selectedNodeId: string | null
   onSelect: (nodeId: string) => void
 }) {
   const [mode, setMode] = useState<"path" | "catalog">("path")
   const [expandedIds, setExpandedIds] = useState(() => new Set<string>())
   const [catalogLimit, setCatalogLimit] = useState(200)
-  const breadcrumb = useMemo(() => getLearningBreadcrumb(selectedNodeId, nodes), [nodes, selectedNodeId])
+  const breadcrumb = useMemo(() => selectedNodeId ? getLearningBreadcrumb(selectedNodeId, nodes) : [], [nodes, selectedNodeId])
   const rootCount = useMemo(() => getLearningChildren(null, nodes).length, [nodes])
 
   useEffect(() => {
@@ -165,8 +165,8 @@ function PathTree({
               </div>
             ))}
             {getLearningChildren(selectedNodeId, nodes).length > 0 && (
-              <div className="mt-3 border-t pt-3">
-                <div className="mb-1 px-2 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">下一层</div>
+              <div className={selectedNodeId ? "mt-3 border-t pt-3" : ""}>
+                <div className="mb-1 px-2 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">{selectedNodeId ? "下一层" : "顶层主题"}</div>
                 {getLearningChildren(selectedNodeId, nodes).map((child) => (
                   <button key={child.id} type="button" onClick={() => onSelect(child.id)} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-slate-50">
                     <CircleDot className="h-3.5 w-3.5 text-slate-400" /><span className="truncate">{child.title}</span>
@@ -309,6 +309,14 @@ export function LearningView() {
     if (!routePinned) setHoveredNodeId(null)
   }
 
+  const returnToGlobal = () => {
+    setFocusNodeId(null)
+    setHoveredNodeId(null)
+    setRoutePinned(false)
+    setChildWindowOffset(0)
+    setDetailOpen(false)
+  }
+
   const handleWheel = (event: React.WheelEvent<HTMLElement>) => {
     if (childCount <= 24) return
     wheelAccumulator.current += event.deltaY
@@ -326,8 +334,8 @@ export function LearningView() {
           <div className="min-w-0"><h1 className="truncate text-sm font-semibold">知识宇宙</h1><p className="truncate text-[11px] text-muted-foreground">{project?.name ?? "通用知识库"} · {atlas.totalConcepts} 个知识节点</p></div>
         </div>
         <nav className="hidden min-w-0 flex-1 items-center justify-center gap-1.5 overflow-hidden px-4 text-xs text-muted-foreground lg:flex" aria-label="当前知识路径">
-          <button type="button" onClick={() => setFocusNodeId(null)} className="shrink-0 rounded-md px-2 py-1 hover:bg-slate-100 hover:text-foreground">全局</button>
-          {getLearningBreadcrumb(node.id, activeNodes).map((item) => <span key={item.id} className="flex min-w-0 items-center gap-1.5"><ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-300" /><button type="button" onClick={() => navigateTo(item.id)} className={`truncate rounded-md px-2 py-1 hover:bg-slate-100 ${item.id === node.id ? "font-medium text-blue-700" : ""}`}>{item.title}</button></span>)}
+          <button type="button" onClick={returnToGlobal} className="shrink-0 rounded-md px-2 py-1 hover:bg-slate-100 hover:text-foreground">全局</button>
+          {focusNodeId && getLearningBreadcrumb(focusNodeId, activeNodes).map((item) => <span key={item.id} className="flex min-w-0 items-center gap-1.5"><ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-300" /><button type="button" onClick={() => navigateTo(item.id)} className={`truncate rounded-md px-2 py-1 hover:bg-slate-100 ${item.id === focusNodeId ? "font-medium text-blue-700" : ""}`}>{item.title}</button></span>)}
         </nav>
         <div className="relative w-[260px] shrink-0 xl:w-[340px]">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -339,7 +347,7 @@ export function LearningView() {
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-[#f8fafc]">
         <div aria-hidden="true" className="knowledge-canvas-grid" />
-        <PathTree nodes={activeNodes} selectedNodeId={node.id} onSelect={navigateTo} />
+        <PathTree nodes={activeNodes} selectedNodeId={focusNodeId} onSelect={navigateTo} />
 
         <main className="absolute inset-0 overflow-hidden" aria-label="镂空知识球工作区" onWheel={handleWheel}>
           <div className="absolute inset-0 transition-transform duration-200 motion-reduce:transition-none" style={{ transform: `scale(${zoom})` }}>
@@ -351,7 +359,7 @@ export function LearningView() {
         </main>
 
         <div className="absolute right-5 top-5 z-30 flex items-center gap-2">
-          <button type="button" onClick={() => setFocusNodeId(null)} className="knowledge-tool-button" title="返回全局地图"><Globe2 className="h-4 w-4" /><span>全局</span></button>
+          <button type="button" onClick={returnToGlobal} className="knowledge-tool-button" title="返回全局地图"><Globe2 className="h-4 w-4" /><span>全局</span></button>
           <button type="button" onClick={() => setDetailOpen(true)} className="knowledge-tool-button" title="查看当前知识详情"><Info className="h-4 w-4" /><span>详情</span></button>
         </div>
 
