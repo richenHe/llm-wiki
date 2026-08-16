@@ -1687,6 +1687,52 @@ training.
   learned parameters.
 `
 
+// ── Ingest graph-quality regression ─────────────────────────────────────────
+
+/**
+ * A compact, original physics survey that recreates the multi-chapter shape of
+ * the 2025 人教版九年级物理 PDF. Nearby sections must not be promoted to
+ * semantic relations merely because they entered one ingest batch.
+ */
+const PHYSICS_RELATION_BOUNDARY_ZH = `# 九年级物理知识摘录
+
+## 内能与热学
+
+比热容表示单位质量的某种物质温度升高 1 摄氏度所吸收的热量。物体吸收或放出热量时，内能会发生变化，因此比热容是分析物体内能变化的重要物理量。
+
+热传导能力可用热导率描述。保温材料通常选择热导率较低的材料，以减慢热量传递。
+
+## 电路规律与安全用电
+
+欧姆定律说明导体中的电流与导体两端电压成正比、与导体电阻成反比。焦耳定律说明电流通过导体产生的热量与电流平方、电阻和通电时间有关；两条定律可共同分析电热器的工作过程。
+
+电功率表示用电器消耗电能的快慢。家庭电路包含火线、零线、用电器、开关和保护装置。安全用电要求不接触低压带电体，不靠近高压带电体，并正确使用保险装置。
+
+## 磁现象与电动机
+
+通电导线周围存在磁场，这称为电流的磁效应。某些物体在磁场中获得磁性，这一过程称为磁化。
+
+直流电动机利用通电线圈在磁场中受力转动。换向器在电动机线圈刚转过平衡位置时改变线圈中的电流方向，使线圈持续转动。
+
+## 电磁感应与发电
+
+闭合电路的一部分导体在磁场中做切割磁感线运动时会产生感应电流，这称为电磁感应。发电机利用电磁感应把机械能转化为电能。
+
+## 信息传递
+
+变化的电流能在空间激起电磁波。无线电广播、微波中继通信和卫星通信都利用电磁波传递信息；卫星通信适合远距离和跨区域通信。
+
+## 能源
+
+原子核发生变化时释放的能量称为核能。核电站利用可控核裂变释放的能量发电。
+
+## 中国科技史资料
+
+FAST 是用于接收射电信号的大型射电望远镜，可服务于脉冲星观测等研究。
+
+北宋学者沈括在《梦溪笔谈》中记录了磁针指南以及磁偏角现象，是中国古代科学观察的重要实例。
+`
+
 // ── Registry and materialize ────────────────────────────────────────────────
 
 export const REAL_CONTENT_DOCS: RealContentDoc[] = [
@@ -1708,6 +1754,8 @@ export const REAL_CONTENT_DOCS: RealContentDoc[] = [
   // D. Knowledge graph / entity (2)
   { filename: "biographical-hinton-en.md", content: BIOGRAPHICAL_HINTON },
   { filename: "rich-graph-survey-en.md", content: RICH_GRAPH_SURVEY },
+  // Knowledge-graph semantic boundary regression (1)
+  { filename: "physics-relation-boundary-zh.md", content: PHYSICS_RELATION_BOUNDARY_ZH },
   // E. Domain diversity (3)
   { filename: "legal-saas-tos-en.md", content: LEGAL_SAAS_TOS },
   { filename: "recipe-thai-curry-en.md", content: RECIPE_THAI_CURRY },

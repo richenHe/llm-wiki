@@ -1,14 +1,14 @@
 /**
  * Real-LLM ingest tests — no mocks on streamChat.
  *
- * Drives autoIngest through the full pipeline against either a real Ollama
- * instance or MiniMax's API, using real source documents from
+ * Drives autoIngest through the full pipeline against a real Ollama instance,
+ * MiniMax's API, or any OpenAI-compatible custom endpoint, using documents from
  * src/test-helpers/real-content.ts (materialized to tests/fixtures/
  * real-content/ which is gitignored).
  *
  * Scenarios cover: 4 baseline + 5 non-English languages + 3 review
- * triggers + 2 knowledge-graph stress + 3 domain diversity + 1 long
- * content = 18 independent scenarios.
+ * triggers + 2 knowledge-graph stress + 1 graph-quality regression +
+ * 3 domain diversity + 1 long content = 19 independent scenarios.
  *
  * Activated with RUN_LLM_TESTS=1. Provider via LLM_PROVIDER env.
  */
@@ -27,9 +27,15 @@ import { useActivityStore } from "@/stores/activity-store"
 import { useChatStore } from "@/stores/chat-store"
 import { detectLanguage } from "./detect-language"
 import { materializeRealContent } from "@/test-helpers/real-content"
+import {
+  evaluateIngestGraphQuality,
+  PHYSICS_RELATION_BOUNDARY,
+  type IngestGraphQualityContract,
+} from "@/test-helpers/ingest-graph-quality"
 
 // ── Provider / model configuration ──────────────────────────────────────────
-const LLM_PROVIDER = (process.env.LLM_PROVIDER ?? "ollama") as "ollama" | "minimax"
+type RealLlmProvider = "ollama" | "minimax" | "custom"
+const LLM_PROVIDER = (process.env.LLM_PROVIDER ?? "ollama") as RealLlmProvider
 // Local llama.cpp server (OpenAI-compatible). Default port 8080; launch with
 // `--jinja` so chat_template_kwargs.enable_thinking=false actually disables
 // Qwen3 thinking. Works via the `ollama` provider (same /v1/chat/completions
@@ -39,6 +45,12 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
 const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY ?? ""
 const MINIMAX_MODEL = process.env.MINIMAX_MODEL ?? "MiniMax-M2.7-highspeed"
 const MINIMAX_ENDPOINT = process.env.MINIMAX_ENDPOINT ?? "https://api.minimaxi.com/v1"
+// Generic OpenAI-compatible route, including a DeepSeek Flash deployment.
+// The endpoint and exact model name are intentionally supplied by the caller
+// because different providers expose "Flash" under different identifiers.
+const CUSTOM_API_KEY = process.env.CUSTOM_API_KEY ?? ""
+const CUSTOM_MODEL = process.env.CUSTOM_MODEL ?? ""
+const CUSTOM_ENDPOINT = process.env.CUSTOM_ENDPOINT ?? ""
 const ENABLED = process.env.RUN_LLM_TESTS === "1"
 
 const REAL_CONTENT_ROOT = path.join(process.cwd(), "tests", "fixtures", "real-content")
@@ -72,6 +84,8 @@ interface RealIngestScenario {
    * most scenarios — source summary + at least one concept/entity page).
    */
   minFilesWritten?: number
+  /** Optional semantic quality contract for generated `related:` edges. */
+  graphQuality?: IngestGraphQualityContract
 }
 
 function page(title: string, body: string, extras: Record<string, string> = {}): string {
@@ -293,6 +307,19 @@ const scenarios: RealIngestScenario[] = [
     languageContractForbidden: FORBID_NON_LATIN,
     minFilesWritten: 3,
   },
+  {
+    name: "physics-relation-boundary-zh",
+    description:
+      "Chinese multi-chapter physics notes. Rejects same-batch topic links " +
+      "while requiring useful physics relations to survive.",
+    realContentFile: "physics-relation-boundary-zh.md",
+    sourcePath: "raw/sources/physics-relation-boundary-zh.md",
+    targetLanguage: "Chinese",
+    seedWikiPages: minimalSeedWiki("Chinese"),
+    languageContractForbidden: FORBID_NON_CJK,
+    minFilesWritten: 6,
+    graphQuality: PHYSICS_RELATION_BOUNDARY,
+  },
 
   // ── E. Domain diversity (3) ────────────────────────────────────────────
   {
@@ -343,11 +370,21 @@ beforeAll(async () => {
   if (LLM_PROVIDER === "minimax" && !MINIMAX_API_KEY) {
     throw new Error("MINIMAX_API_KEY env var is required when LLM_PROVIDER=minimax")
   }
+  if (
+    LLM_PROVIDER === "custom" &&
+    (!CUSTOM_API_KEY || !CUSTOM_MODEL || !CUSTOM_ENDPOINT)
+  ) {
+    throw new Error(
+      "CUSTOM_API_KEY, CUSTOM_MODEL, and CUSTOM_ENDPOINT are required when LLM_PROVIDER=custom",
+    )
+  }
   await materializeRealContent(REAL_CONTENT_ROOT)
   // eslint-disable-next-line no-console
   console.log(
     LLM_PROVIDER === "minimax"
       ? `\n[real-llm] Provider: minimax  Model: ${MINIMAX_MODEL}\n`
+      : LLM_PROVIDER === "custom"
+        ? `\n[real-llm] Provider: custom  Endpoint: ${CUSTOM_ENDPOINT}  Model: ${CUSTOM_MODEL}\n`
       : `\n[real-llm] Provider: ollama  Endpoint: ${OLLAMA_URL}  Model: ${OLLAMA_MODEL}\n`,
   )
 })
@@ -408,6 +445,15 @@ async function setupScenario(scenario: RealIngestScenario): Promise<Ctx> {
           customEndpoint: MINIMAX_ENDPOINT,
           maxContextSize: 110000,
         }
+      : LLM_PROVIDER === "custom"
+        ? {
+            provider: "custom",
+            apiKey: CUSTOM_API_KEY,
+            model: CUSTOM_MODEL,
+            ollamaUrl: "",
+            customEndpoint: CUSTOM_ENDPOINT,
+            maxContextSize: 110000,
+          }
       : {
           provider: "ollama",
           apiKey: "",
@@ -524,6 +570,39 @@ async function assertContracts(
     brokenLinks.length,
     `too many broken [[wikilinks]] in generated wiki (${brokenLinks.length}). First: ${brokenLinks[0]?.detail ?? "-"}`,
   ).toBeLessThanOrEqual(150)
+
+  // 7. Optional semantic relation boundary. This guards against a model
+  // treating adjacency in one source/chunk as evidence of a knowledge-graph
+  // relation while also preventing an empty graph from passing as "clean".
+  if (scenario.graphQuality) {
+    const graphPages = await Promise.all(
+      writtenPaths
+        .filter((p) => p.startsWith("wiki/") && p.endsWith(".md"))
+        .filter((p) => !p.startsWith("wiki/sources/"))
+        .filter((p) => p !== "wiki/index.md" && p !== "wiki/log.md")
+        .map(async (p) => ({
+          path: p,
+          content: await readFileRaw(path.join(tmpPath, p)),
+        })),
+    )
+    const report = evaluateIngestGraphQuality(graphPages, scenario.graphQuality)
+    expect(
+      report.forbiddenHits,
+      `semantic relation contamination: ${report.forbiddenHits
+        .map((pair) => `${pair.left} -> ${pair.right}`)
+        .join(", ")}`,
+    ).toEqual([])
+
+    const minimumExpected =
+      scenario.graphQuality.minExpectedRelatedPairs ??
+      scenario.graphQuality.expectedRelatedPairs.length
+    expect(
+      report.expectedHits.length,
+      `useful graph relations were lost: found ${report.expectedHits.length}/${scenario.graphQuality.expectedRelatedPairs.length}; missing ${report.missingExpectedPairs
+        .map((pair) => `${pair.left} -> ${pair.right}`)
+        .join(", ")}`,
+    ).toBeGreaterThanOrEqual(minimumExpected)
+  }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
