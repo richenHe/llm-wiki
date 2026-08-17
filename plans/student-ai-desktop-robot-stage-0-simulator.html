@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>阶段 0｜AI 课堂跟随机器人闭环模拟器</title>
+  <!--
+    THESIS: 把“目标在哪里、系统为什么行动、左右轮收到什么”同时放在一张可操纵的实验台上，拒绝只展示最终动画的黑箱模拟器。
+    OWN-WORLD: 继承机器人手册的冷白记录纸、深蓝绿控制台、青绿有效信号与琥珀安全闸门；数据、状态与操作共用工程实验语言。
+    STORY: 先拖动目标形成观察，再看状态优先级和差速公式，随后主动制造目标丢失、USB 断开与障碍，最后导出证据。
+    FIRST VIEWPORT: 左侧大实验场是主角，右侧同时显示状态、轮速、公式和原因；顶部直接提供六个可复现实验预设。
+    FORM: 桌面操作型闭环实验台；结构优先级为操纵对象 → 中间数据 → 决策原因 → 验收证据。
+  -->
+  <style>
+    :root{
+      --paper:#f2f5f5;--surface:#fff;--ink:#152b2e;--muted:#566b6d;--line:#c9d6d6;--line-strong:#8ca3a2;
+      --deep:#082b30;--navy:#123e43;--signal:#078371;--signal-soft:#d9f1eb;--amber:#a66000;--amber-soft:#fff0d8;
+      --danger:#9a342d;--danger-soft:#fbe7e4;--focus:#0874ae;--shadow:0 18px 42px rgba(0,0,0,.12);--radius:14px;
+    }
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth}
+    body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.65 "Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif}
+    button,input{font:inherit}button{touch-action:manipulation}a{color:#087568;text-underline-offset:.18em}
+    a:focus-visible,button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+    .topbar{background:var(--deep);color:#eef8f6;border-bottom:4px solid #e0a02e}
+    .topbar-inner{width:min(calc(100% - 3rem),92rem);margin:auto;padding:1.15rem 0;display:flex;justify-content:space-between;align-items:center;gap:1.5rem}
+    .brand{display:flex;align-items:center;gap:1rem}.stage-mark{display:grid;place-items:center;width:2.8rem;height:2.8rem;border-radius:50%;background:#f0b84d;color:#332000;font-size:1.15rem;font-weight:900}
+    .brand strong{display:block;font-size:1.05rem}.brand span{display:block;color:#abc7c3;font-size:.82rem}
+    .top-links{display:flex;gap:1.2rem}.top-links a{color:#a4ddd3}
+    main{width:min(calc(100% - 3rem),92rem);margin:auto;padding:2rem 0 5rem}
+    .intro{display:grid;grid-template-columns:minmax(0,1fr) 26rem;gap:3rem;align-items:end;margin-bottom:1.6rem}
+    .intro h1{max-width:17ch;margin:0;color:var(--deep);font-size:clamp(2rem,4vw,3.7rem);line-height:1.04;letter-spacing:-.035em}
+    .intro p{max-width:65ch;margin:.8rem 0 0;color:var(--muted);font-size:1.03rem}.stage-rule{padding:1rem 1.1rem;background:var(--amber-soft);border-block:1px solid #d29d4d;border-radius:8px;color:#573500}
+    .preset-bar{display:flex;flex-wrap:wrap;gap:.55rem;margin:0 0 1rem;padding:.8rem;background:#e4eceb;border-block:1px solid var(--line-strong)}
+    .preset,.action{min-height:2.65rem;padding:.55rem .85rem;border:1px solid #78908f;border-radius:9px;background:#fff;color:var(--navy);font-weight:750;cursor:pointer}
+    .preset:hover,.action:hover{background:#edf7f5;border-color:var(--signal)}.preset[aria-current="true"]{background:var(--navy);color:#fff;border-color:var(--navy)}
+    .workspace{display:grid;grid-template-columns:minmax(36rem,1.7fr) minmax(24rem,.9fr);gap:1rem;align-items:start}
+    .arena-panel,.diagnostics,.controls,.trace-panel,.explain{background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--radius);box-shadow:var(--shadow)}
+    .panel-head{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;padding:1rem 1.15rem;border-bottom:1px solid var(--line)}
+    .panel-head h2,.panel-head h3{margin:0;color:var(--deep);font-size:1rem}.panel-head p{margin:.2rem 0 0;color:var(--muted);font-size:.82rem}
+    .live{display:inline-flex;align-items:center;gap:.4rem;color:#07675b;font-size:.78rem;font-weight:800}.live::before{content:"";width:.55rem;height:.55rem;border-radius:50%;background:var(--signal)}
+    .arena{position:relative;min-height:31rem;overflow:hidden;background:#e9efee;cursor:crosshair;user-select:none;touch-action:none}
+    .arena::before{content:"";position:absolute;inset:0;background:linear-gradient(to right,transparent 49.9%,#9fb2b1 50%,transparent 50.1%),linear-gradient(to bottom,transparent 74.9%,#b8c6c5 75%,transparent 75.1%);pointer-events:none}
+    .axis-label{position:absolute;color:#617473;font-size:.72rem;font-weight:700;pointer-events:none}.axis-label.left{left:.7rem;top:.5rem}.axis-label.center{left:50%;top:.5rem;transform:translateX(-50%)}.axis-label.right{right:.7rem;top:.5rem}.axis-label.far{left:.7rem;top:3rem}.axis-label.near{left:.7rem;bottom:1rem}
+    .target{position:absolute;z-index:3;display:grid;place-items:center;width:4rem;height:4rem;border:3px solid #fff;border-radius:50%;background:#d78820;color:#2f1c00;box-shadow:0 8px 20px rgba(77,45,0,.25);font-weight:900;cursor:grab;transform:translate(-50%,-50%)}
+    .target:active{cursor:grabbing}.target[hidden]{display:none}.target small{display:block;font-size:.58rem;font-weight:800;text-align:center;line-height:1.1}
+    .target-line{position:absolute;z-index:1;left:50%;bottom:24%;height:2px;background:#078371;transform-origin:left center;opacity:.75;pointer-events:none}
+    .robot{position:absolute;z-index:2;left:50%;bottom:9%;width:8rem;height:5.2rem;transform:translateX(-50%);transition:transform 160ms cubic-bezier(.2,.8,.2,1)}
+    .robot-body{position:absolute;inset:.6rem 1.1rem;background:var(--navy);border:3px solid #fff;border-radius:12px;box-shadow:0 8px 18px rgba(8,43,48,.25)}.camera{position:absolute;left:50%;top:0;width:1.6rem;height:1.2rem;border-radius:4px;background:#f0b84d;transform:translateX(-50%)}
+    .wheel{position:absolute;width:1rem;height:2.1rem;border-radius:4px;background:#23393b}.wheel.l1{left:.2rem;top:.4rem}.wheel.l2{left:.2rem;bottom:.4rem}.wheel.r1{right:.2rem;top:.4rem}.wheel.r2{right:.2rem;bottom:.4rem}
+    .arena-note{position:absolute;right:1rem;bottom:1rem;max-width:18rem;padding:.55rem .7rem;background:rgba(255,255,255,.88);border:1px solid var(--line);border-radius:8px;color:var(--muted);font-size:.76rem;pointer-events:none}
+    .diagnostics{overflow:hidden}.state-banner{padding:1.15rem;background:var(--deep);color:#fff}.state-banner small{display:block;color:#a9c8c4;font-weight:750}.state-banner strong{display:block;margin:.15rem 0;font-size:1.65rem;letter-spacing:-.02em}.state-banner span{color:#d9e8e6;font-size:.88rem}
+    .state-banner.stop{background:#702720}.state-banner.warn{background:#70501f}.metric-grid{display:grid;grid-template-columns:repeat(2,1fr)}.metric{min-height:6rem;padding:1rem;border-right:1px solid var(--line);border-bottom:1px solid var(--line)}.metric:nth-child(2n){border-right:0}.metric small{display:block;color:var(--muted)}.metric strong{display:block;margin:.15rem 0;color:var(--deep);font:800 1.5rem/1.2 Consolas,"Cascadia Code",monospace}.metric span{color:var(--muted);font-size:.76rem}
+    .wheel-output{padding:1rem 1.15rem}.wheel-row{display:grid;grid-template-columns:3.8rem 1fr 3.5rem;gap:.7rem;align-items:center;margin:.65rem 0}.wheel-row span{color:var(--navy);font-weight:800}.bar{position:relative;height:.8rem;background:#dce6e5;border-radius:999px;overflow:hidden}.bar::after{content:"";position:absolute;left:50%;top:0;bottom:0;width:1px;background:#78908f}.fill{position:absolute;top:0;bottom:0;left:50%;width:0;background:var(--signal)}.wheel-row output{text-align:right;font:800 .9rem Consolas,monospace}
+    .formula{margin:0;padding:1rem 1.15rem;background:#e7efee;border-top:1px solid var(--line);color:#123e43;font:.82rem/1.65 Consolas,"Cascadia Code",monospace;white-space:pre-wrap}
+    .controls{grid-column:1/2;margin-top:1rem;box-shadow:none}.control-grid{display:grid;grid-template-columns:repeat(4,1fr)}.control{padding:1rem;border-right:1px solid var(--line)}.control:last-child{border-right:0}.control label{display:flex;justify-content:space-between;gap:.6rem;color:var(--navy);font-weight:750}.control output{font:700 .85rem Consolas,monospace}.control input[type="range"]{width:100%;margin:.7rem 0 0;accent-color:var(--signal)}.toggle-row{display:flex;gap:.55rem;margin-top:.7rem}.toggle{flex:1;min-height:2.5rem;border:1px solid #78908f;border-radius:8px;background:#fff;color:var(--navy);font-weight:750;cursor:pointer}.toggle[aria-pressed="false"]{background:var(--danger-soft);color:#79251e;border-color:#c97d75}
+    .explain{grid-column:2/3;margin-top:1rem;padding:1.1rem 1.2rem;box-shadow:none}.explain h3{margin:0 0 .55rem;color:var(--deep);font-size:1rem}.explain p{margin:.4rem 0;color:var(--muted);font-size:.88rem}.explain strong{color:var(--navy)}
+    .trace-panel{grid-column:1/-1;margin-top:1rem;overflow:hidden;box-shadow:none}.trace-actions{display:flex;gap:.5rem}.trace-wrap{overflow:auto;max-height:23rem}table{width:100%;border-collapse:collapse;font-size:.82rem}th,td{padding:.68rem .75rem;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{position:sticky;top:0;background:#dfe9e8;color:var(--deep);z-index:2}td.reason{white-space:normal;min-width:16rem}.empty{text-align:center;color:var(--muted);padding:2rem}
+    .test-result{display:none;padding:1rem 1.15rem;border-top:1px solid var(--line)}.test-result.visible{display:block}.test-result.pass{background:var(--signal-soft);color:#075f54}.test-result.fail{background:var(--danger-soft);color:#7c211b}.test-result strong{display:block}.test-list{margin:.5rem 0 0;padding-left:1.2rem}
+    footer{width:min(calc(100% - 3rem),92rem);margin:0 auto 3rem;padding-top:1.2rem;border-top:1px solid var(--line-strong);color:var(--muted);font-size:.82rem}
+    @media(max-width:1100px){.intro{grid-template-columns:1fr}.workspace{grid-template-columns:1fr}.controls,.explain,.trace-panel{grid-column:1}.control-grid{grid-template-columns:repeat(2,1fr)}.control:nth-child(2){border-right:0}.control:nth-child(-n+2){border-bottom:1px solid var(--line)}}
+    @media(max-width:720px){.topbar-inner,main,footer{width:min(calc(100% - 2rem),92rem)}.topbar-inner{align-items:flex-start;flex-direction:column}.workspace{display:block}.diagnostics,.controls,.explain,.trace-panel{margin-top:1rem}.arena{min-height:25rem}.control-grid,.metric-grid{grid-template-columns:1fr}.control,.metric{border-right:0}.control{border-bottom:1px solid var(--line)}.intro h1{font-size:2.2rem}}
+    @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.robot{transition:none}}
+    @media print{.topbar,.preset-bar,.controls,.trace-actions{display:none}body{background:#fff}main,footer{width:100%}.workspace{display:block}.arena-panel,.diagnostics,.explain,.trace-panel{margin-bottom:1rem;box-shadow:none;break-inside:avoid}}
+  </style>
+</head>
+<body>
+  <header class="topbar"><div class="topbar-inner"><div class="brand"><div class="stage-mark">0</div><div><strong>软件闭环实验台</strong><span>无硬件 · 可观察 · 可制造故障</span></div></div><nav class="top-links" aria-label="相关文档"><a href="student-ai-desktop-robot-guided-learning.html#stage-0">返回阶段教程</a><a href="student-ai-desktop-robot-learning-guide.html#principles">查看底层原理</a></nav></div></header>
+  <main>
+    <section class="intro" aria-labelledby="page-title"><div><h1 id="page-title">先让错误变成数字，再让数字驱动轮子</h1><p>拖动橙色人物，观察横向误差如何变成左右轮速度；然后主动隐藏目标、断开 USB 或把障碍移近，验证安全状态能否立即覆盖普通跟随。</p></div><div class="stage-rule"><strong>本阶段边界：</strong>这里模拟规则，不识别真实人物，也不连接电机。例如看到“左轮 0.12、右轮 0.78”只证明计算方向正确，不证明真实接线正确。</div></section>
+
+    <div class="preset-bar" aria-label="实验预设">
+      <button class="preset" type="button" data-preset="left">目标在左</button>
+      <button class="preset" type="button" data-preset="center">目标居中</button>
+      <button class="preset" type="button" data-preset="right">目标在右</button>
+      <button class="preset" type="button" data-preset="lost">目标丢失</button>
+      <button class="preset" type="button" data-preset="usb">USB 断开</button>
+      <button class="preset" type="button" data-preset="obstacle">障碍 22cm</button>
+      <button class="action" type="button" id="run-tests">运行六项自动验收</button>
+    </div>
+
+    <div class="workspace">
+      <section class="arena-panel" aria-labelledby="arena-title">
+        <div class="panel-head"><div><h2 id="arena-title">真实输入的替身：人物在画面中的位置</h2><p>拖动人物；选中人物后也可用方向键微调。</p></div><span class="live">实时计算</span></div>
+        <div class="arena" id="arena" aria-label="目标位置模拟区域">
+          <span class="axis-label left">左 −1</span><span class="axis-label center">中心 0</span><span class="axis-label right">右 +1</span><span class="axis-label far">远</span><span class="axis-label near">近</span>
+          <div class="target-line" id="target-line" aria-hidden="true"></div>
+          <div class="target" id="target" tabindex="0" role="slider" aria-label="人物目标位置" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="-55"><span>人物<small>拖动 / 方向键</small></span></div>
+          <div class="robot" id="robot" aria-label="虚拟机器人"><div class="wheel l1"></div><div class="wheel l2"></div><div class="robot-body"><div class="camera"></div></div><div class="wheel r1"></div><div class="wheel r2"></div></div>
+          <div class="arena-note">人物越靠下，模拟的目标框越大，表示距离越近；框大到阈值后，机器人停止前进。</div>
+        </div>
+        <div class="test-result" id="test-result" role="status" aria-live="polite"></div>
+      </section>
+
+      <aside class="diagnostics" aria-labelledby="diag-title">
+        <div class="state-banner" id="state-banner"><small id="diag-title">当前行为状态</small><strong id="state-name">TRACK</strong><span id="state-reason">目标可见，允许闭环跟随</span></div>
+        <div class="metric-grid">
+          <div class="metric"><small>横向位置 x</small><strong id="x-value">−0.55</strong><span>左为负，右为正</span></div>
+          <div class="metric"><small>目标大小</small><strong id="size-value">0.15</strong><span>越大表示越近</span></div>
+          <div class="metric"><small>前进量</small><strong id="forward-value">0.41</strong><span>接近目标后下降</span></div>
+          <div class="metric"><small>转向量 turn</small><strong id="turn-value">−0.36</strong><span>死区内归零</span></div>
+        </div>
+        <div class="wheel-output"><div class="wheel-row"><span>左轮</span><div class="bar"><i class="fill" id="left-fill"></i></div><output id="left-value">0.05</output></div><div class="wheel-row"><span>右轮</span><div class="bar"><i class="fill" id="right-fill"></i></div><output id="right-value">0.77</output></div></div>
+        <pre class="formula" id="formula">turn = Kp × x
+left = forward + turn
+right = forward − turn</pre>
+      </aside>
+
+      <section class="controls" aria-labelledby="controls-title"><div class="panel-head"><div><h3 id="controls-title">改变证据与决策参数</h3><p>先改变一个值，再预测可见结果。</p></div></div><div class="control-grid">
+        <div class="control"><label for="obstacle"><span>障碍距离</span><output id="obstacle-value">100cm</output></label><input id="obstacle" type="range" min="10" max="120" value="100" step="1"></div>
+        <div class="control"><label for="kp"><span>转向增益 Kp</span><output id="kp-value">0.65</output></label><input id="kp" type="range" min="0.20" max="1.20" value="0.65" step="0.05"></div>
+        <div class="control"><label for="deadzone"><span>中心死区</span><output id="deadzone-value">0.08</output></label><input id="deadzone" type="range" min="0" max="0.30" value="0.08" step="0.01"></div>
+        <div class="control"><span style="color:var(--navy);font-weight:750">输入是否有效</span><div class="toggle-row"><button class="toggle" id="target-toggle" type="button" aria-pressed="true">目标可见</button><button class="toggle" id="usb-toggle" type="button" aria-pressed="true">USB 已连接</button></div></div>
+      </div></section>
+
+      <aside class="explain"><h3>现在应该怎样解释</h3><p><strong>问题：</strong>人一直移动，固定命令会过时。</p><p><strong>输入：</strong>目标位置、大小、可见性、障碍和连接。</p><p><strong>转换：</strong>先按安全优先级选状态，再计算差速。</p><p><strong>输出：</strong>左右轮命令、状态和原因。</p><p><strong>不证明：</strong>当前结果没有经过真实相机、串口和电机。</p></aside>
+
+      <section class="trace-panel" aria-labelledby="trace-title"><div class="panel-head"><div><h3 id="trace-title">最近诊断轨迹</h3><p>先看哪一列最早异常，就能定位错误发生在哪一层。</p></div><div class="trace-actions"><button class="action" type="button" id="copy-evidence">复制当前证据</button><button class="action" type="button" id="clear-trace">清空轨迹</button></div></div><div class="trace-wrap"><table><thead><tr><th>时间</th><th>状态</th><th>x</th><th>大小</th><th>距离</th><th>左轮</th><th>右轮</th><th>原因</th></tr></thead><tbody id="trace-body"></tbody></table></div></section>
+    </div>
+  </main>
+  <footer>阶段 0 软件证据 · 记录日期 2026-08-17 · 下一阶段进入前必须由学习者解释输入、转换、输出和证据限制。</footer>
+
+  <script type="application/json" id="simulator-manifest">{
+    "stageId":"stage-0-software-loop",
+    "architectureRevision":"robot-loop-v1",
+    "coordinateContract":"x left negative, right positive",
+    "equations":{"turn":"Kp*x outside deadzone","left":"forward+turn","right":"forward-turn"},
+    "priority":["CONNECTION_LOST","OBSTACLE_STOP","TARGET_LOST","ARRIVED","TRACK"],
+    "acceptance":["left target makes right wheel faster","right target makes left wheel faster","center deadzone removes turn","lost target stops","USB disconnect stops","obstacle below 30cm stops"],
+    "doesNotProve":["camera detection","serial compatibility","motor wiring","battery behavior"]
+  }</script>
+  <script>
+    (function(){
+      'use strict';
+      var model={x:-0.55,y:0.22,visible:true,usb:true,obstacle:100,kp:0.65,deadzone:0.08,maxForward:0.55};
+      var arena=document.getElementById('arena'),target=document.getElementById('target'),robot=document.getElementById('robot'),line=document.getElementById('target-line');
+      var traceBody=document.getElementById('trace-body'),lastSignature='',trace=[],dragging=false,activePreset='left';
+      var ids=['x-value','size-value','forward-value','turn-value','left-value','right-value','state-name','state-reason','obstacle-value','kp-value','deadzone-value'];
+      var el={};ids.forEach(function(id){el[id]=document.getElementById(id)});
+      var stateBanner=document.getElementById('state-banner'),leftFill=document.getElementById('left-fill'),rightFill=document.getElementById('right-fill'),formula=document.getElementById('formula');
+      function clamp(v,min,max){return Math.max(min,Math.min(max,v))}
+      function signed(v){var n=Math.abs(v)<0.005?0:v;return (n<0?'−':'')+Math.abs(n).toFixed(2)}
+      function compute(input){
+        var size=0.10+input.y*0.24,forward=clamp((0.30-size)/0.20*input.maxForward,0,input.maxForward),turn=Math.abs(input.x)<=input.deadzone?0:clamp(input.kp*input.x,-0.75,0.75);
+        var state='TRACK',reason='目标可见，允许闭环跟随';
+        if(!input.usb){state='CONNECTION_LOST';reason='USB 已断开，旧命令立即失效'}
+        else if(input.obstacle<30){state='OBSTACLE_STOP';reason='障碍距离小于 30cm，安全规则覆盖跟随'}
+        else if(!input.visible){state='TARGET_LOST';reason='目标不可见，禁止沿用上一条轮速'}
+        else if(size>=0.30){state='ARRIVED';reason='目标框已足够大，认为已经到达'}
+        else if(Math.abs(input.x)<=input.deadzone){state='ALIGNED';reason='目标位于中心死区，只保留前进量'}
+        var canMove=state==='TRACK'||state==='ALIGNED';
+        if(!canMove){forward=0;turn=0}
+        var left=clamp(forward+turn,-1,1),right=clamp(forward-turn,-1,1);
+        return {size:size,forward:forward,turn:turn,left:left,right:right,state:state,reason:reason};
+      }
+      function setBar(node,value){var magnitude=Math.abs(value)*50;node.style.width=magnitude+'%';node.style.left=value>=0?'50%':(50-magnitude)+'%';node.style.background=value<0?'#a66000':'#078371'}
+      function logResult(result){
+        var signature=[result.state,model.x.toFixed(2),result.size.toFixed(2),model.obstacle,result.left.toFixed(2),result.right.toFixed(2)].join('|');
+        if(signature===lastSignature)return;lastSignature=signature;
+        trace.unshift({time:new Date().toLocaleTimeString('zh-CN',{hour12:false}),state:result.state,x:model.x,size:result.size,distance:model.obstacle,left:result.left,right:result.right,reason:result.reason});trace=trace.slice(0,14);renderTrace();
+      }
+      function renderTrace(){traceBody.innerHTML='';if(!trace.length){traceBody.innerHTML='<tr><td colspan="8" class="empty">拖动人物或选择一个实验预设后，这里会出现诊断记录。</td></tr>';return}trace.forEach(function(row){var tr=document.createElement('tr');[row.time,row.state,signed(row.x),row.size.toFixed(2),row.distance+'cm',signed(row.left),signed(row.right),row.reason].forEach(function(value,index){var td=document.createElement('td');td.textContent=value;if(index===7)td.className='reason';tr.appendChild(td)});traceBody.appendChild(tr)})}
+      function render(shouldLog){
+        var result=compute(model),leftPos=(model.x+1)/2*100,topPos=8+model.y*66,targetSize=3.2+model.y*2.5;
+        target.style.left=leftPos+'%';target.style.top=topPos+'%';target.style.width=targetSize+'rem';target.style.height=targetSize+'rem';target.hidden=!model.visible;target.setAttribute('aria-valuenow',Math.round(model.x*100));
+        line.style.display=model.visible?'block':'none';var dx=leftPos-50,dy=topPos-75,length=Math.sqrt(dx*dx+dy*dy),angle=Math.atan2(dy,dx)*180/Math.PI;line.style.width=length+'%';line.style.transform='rotate('+angle+'deg)';
+        robot.style.transform='translateX(-50%) rotate('+clamp(result.turn*28,-18,18)+'deg)';
+        el['x-value'].textContent=signed(model.x);el['size-value'].textContent=result.size.toFixed(2);el['forward-value'].textContent=signed(result.forward);el['turn-value'].textContent=signed(result.turn);el['left-value'].textContent=signed(result.left);el['right-value'].textContent=signed(result.right);
+        el['state-name'].textContent=result.state;el['state-reason'].textContent=result.reason;el['obstacle-value'].textContent=model.obstacle+'cm';el['kp-value'].textContent=model.kp.toFixed(2);el['deadzone-value'].textContent=model.deadzone.toFixed(2);
+        stateBanner.className='state-banner'+(['CONNECTION_LOST','OBSTACLE_STOP','TARGET_LOST'].indexOf(result.state)>=0?' stop':result.state==='ARRIVED'?' warn':'');
+        setBar(leftFill,result.left);setBar(rightFill,result.right);
+        formula.textContent='turn = '+model.kp.toFixed(2)+' × '+signed(model.x)+' = '+signed(result.turn)+'\nleft = '+signed(result.forward)+' + '+signed(result.turn)+' = '+signed(result.left)+'\nright = '+signed(result.forward)+' − '+signed(result.turn)+' = '+signed(result.right);
+        document.getElementById('target-toggle').setAttribute('aria-pressed',String(model.visible));document.getElementById('target-toggle').textContent=model.visible?'目标可见':'目标已隐藏';document.getElementById('usb-toggle').setAttribute('aria-pressed',String(model.usb));document.getElementById('usb-toggle').textContent=model.usb?'USB 已连接':'USB 已断开';
+        document.querySelectorAll('[data-preset]').forEach(function(button){button.setAttribute('aria-current',String(button.dataset.preset===activePreset))});if(shouldLog!==false)logResult(result);return result;
+      }
+      function setPointer(event){var rect=arena.getBoundingClientRect();model.x=clamp(((event.clientX-rect.left)/rect.width)*2-1,-.92,.92);model.y=clamp((event.clientY-rect.top)/rect.height,.08,.86);model.visible=true;activePreset='custom';render()}
+      target.addEventListener('pointerdown',function(event){dragging=true;target.setPointerCapture(event.pointerId);setPointer(event)});target.addEventListener('pointermove',function(event){if(dragging)setPointer(event)});target.addEventListener('pointerup',function(){dragging=false});
+      arena.addEventListener('pointerdown',function(event){if(event.target!==target)setPointer(event)});
+      target.addEventListener('keydown',function(event){var step=event.shiftKey?.1:.04;if(event.key==='ArrowLeft')model.x-=step;else if(event.key==='ArrowRight')model.x+=step;else if(event.key==='ArrowUp')model.y-=step;else if(event.key==='ArrowDown')model.y+=step;else return;event.preventDefault();model.x=clamp(model.x,-.92,.92);model.y=clamp(model.y,.08,.86);activePreset='custom';render()});
+      var presets={left:{x:-.62,y:.22,visible:true,usb:true,obstacle:100},center:{x:0,y:.22,visible:true,usb:true,obstacle:100},right:{x:.62,y:.22,visible:true,usb:true,obstacle:100},lost:{x:-.1,y:.22,visible:false,usb:true,obstacle:100},usb:{x:.2,y:.22,visible:true,usb:false,obstacle:100},obstacle:{x:.35,y:.22,visible:true,usb:true,obstacle:22}};
+      document.querySelectorAll('[data-preset]').forEach(function(button){button.addEventListener('click',function(){Object.assign(model,presets[button.dataset.preset]);document.getElementById('obstacle').value=model.obstacle;activePreset=button.dataset.preset;render()})});
+      document.getElementById('obstacle').addEventListener('input',function(){model.obstacle=Number(this.value);activePreset='custom';render()});document.getElementById('kp').addEventListener('input',function(){model.kp=Number(this.value);activePreset='custom';render()});document.getElementById('deadzone').addEventListener('input',function(){model.deadzone=Number(this.value);activePreset='custom';render()});
+      document.getElementById('target-toggle').addEventListener('click',function(){model.visible=!model.visible;activePreset='custom';render()});document.getElementById('usb-toggle').addEventListener('click',function(){model.usb=!model.usb;activePreset='custom';render()});
+      document.getElementById('clear-trace').addEventListener('click',function(){trace=[];lastSignature='';renderTrace()});
+      document.getElementById('copy-evidence').addEventListener('click',async function(){var result=compute(model),payload=JSON.stringify({stage:'stage-0-software-loop',observedAt:new Date().toISOString(),input:{x:model.x,size:result.size,visible:model.visible,obstacleCm:model.obstacle,usb:model.usb,kp:model.kp,deadzone:model.deadzone},output:{state:result.state,left:result.left,right:result.right,reason:result.reason},limit:'software simulation only; no physical hardware verified'},null,2),button=this,original=button.textContent,ok=false;try{await navigator.clipboard.writeText(payload);ok=true}catch(error){var area=document.createElement('textarea');area.value=payload;document.body.appendChild(area);area.select();ok=document.execCommand('copy');area.remove()}button.textContent=ok?'证据已复制':'请手动复制';setTimeout(function(){button.textContent=original},1600)});
+      document.getElementById('run-tests').addEventListener('click',function(){var base={x:0,y:.22,visible:true,usb:true,obstacle:100,kp:.65,deadzone:.08,maxForward:.55},cases=[['左侧目标令右轮更快',Object.assign({},base,{x:-.62}),function(r){return r.right>r.left}],['右侧目标令左轮更快',Object.assign({},base,{x:.62}),function(r){return r.left>r.right}],['中心死区令转向归零',Object.assign({},base,{x:.03}),function(r){return Math.abs(r.turn)<.001&&r.state==='ALIGNED'}],['目标丢失立即停车',Object.assign({},base,{visible:false}),function(r){return r.state==='TARGET_LOST'&&r.left===0&&r.right===0}],['USB 断开立即停车',Object.assign({},base,{usb:false}),function(r){return r.state==='CONNECTION_LOST'&&r.left===0&&r.right===0}],['障碍 22cm 覆盖跟随',Object.assign({},base,{obstacle:22}),function(r){return r.state==='OBSTACLE_STOP'&&r.left===0&&r.right===0}]],results=cases.map(function(item){var result=compute(item[1]);return {name:item[0],pass:item[2](result)}}),all=results.every(function(item){return item.pass}),box=document.getElementById('test-result');box.className='test-result visible '+(all?'pass':'fail');box.innerHTML='<strong>'+(all?'6/6 自动规则验收通过':'自动验收存在失败')+'</strong><ul class="test-list">'+results.map(function(item){return '<li>'+(item.pass?'通过：':'失败：')+item.name+'</li>'}).join('')+'</ul><span>它证明纯计算规则符合当前约定；不证明鼠标交互、真实硬件或传感器可靠。</span>'});
+      render();
+    })();
+  </script>
+</body>
+</html>
