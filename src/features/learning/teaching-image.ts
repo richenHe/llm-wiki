@@ -35,6 +35,48 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary)
 }
 
+function isQwenImage3(model: string): boolean {
+  return /^qwen-image-3\.0(?:-|$)/i.test(model.trim())
+}
+
+function dashScopeImageEndpoint(endpoint: string): string {
+  try {
+    const url = new URL(endpoint.trim())
+    if (url.hostname === "dashscope.aliyuncs.com"
+      || url.hostname === "dashscope-intl.aliyuncs.com"
+      || url.hostname.endsWith(".maas.aliyuncs.com")) {
+      url.pathname = "/api/v1/services/aigc/multimodal-generation/generation"
+      url.search = ""
+      url.hash = ""
+      return url.toString()
+    }
+  } catch {
+    // Let fetch report malformed or custom endpoints with its normal error.
+  }
+  return endpoint.trim()
+}
+
+function qwenImageUrl(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined
+  const output = (payload as { output?: unknown }).output
+  if (!output || typeof output !== "object") return undefined
+  const choices = (output as { choices?: unknown }).choices
+  if (!Array.isArray(choices)) return undefined
+  for (const choice of choices) {
+    if (!choice || typeof choice !== "object") continue
+    const message = (choice as { message?: unknown }).message
+    if (!message || typeof message !== "object") continue
+    const content = (message as { content?: unknown }).content
+    if (!Array.isArray(content)) continue
+    for (const item of content) {
+      if (item && typeof item === "object" && typeof (item as { image?: unknown }).image === "string") {
+        return (item as { image: string }).image
+      }
+    }
+  }
+  return undefined
+}
+
 export async function generateTeachingImage(input: {
   projectPath: string
   fingerprint: string
@@ -52,18 +94,34 @@ export async function generateTeachingImage(input: {
     throw new Error("教学图片接口还没有配置完整。")
   }
   const httpFetch = await getHttpFetch()
-  const response = await httpFetch(input.config.endpoint.trim(), {
+  const qwenImage = isQwenImage3(input.config.model)
+  const endpoint = qwenImage ? dashScopeImageEndpoint(input.config.endpoint) : input.config.endpoint.trim()
+  const body = qwenImage
+    ? {
+        model: input.config.model.trim(),
+        input: {
+          messages: [{ role: "user", content: [{ text: input.prompt }] }],
+        },
+        parameters: {
+          size: input.config.size.replace("x", "*"),
+          n: 1,
+          prompt_extend: false,
+          watermark: false,
+        },
+      }
+    : {
+        model: input.config.model.trim(),
+        prompt: input.prompt,
+        size: input.config.size,
+        output_format: "png",
+      }
+  const response = await httpFetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${input.config.apiKey.trim()}`,
     },
-    body: JSON.stringify({
-      model: input.config.model.trim(),
-      prompt: input.prompt,
-      size: input.config.size,
-      output_format: "png",
-    }),
+    body: JSON.stringify(body),
     signal: input.signal,
   })
   if (!response.ok) {
@@ -73,8 +131,9 @@ export async function generateTeachingImage(input: {
   const payload = await response.json() as { data?: Array<{ b64_json?: string; url?: string }> }
   const result = payload.data?.[0]
   let base64 = result?.b64_json
-  if (!base64 && result?.url) {
-    const imageResponse = await httpFetch(result.url, { signal: input.signal })
+  const resultUrl = qwenImage ? qwenImageUrl(payload) : result?.url
+  if (!base64 && resultUrl) {
+    const imageResponse = await httpFetch(resultUrl, { signal: input.signal })
     if (!imageResponse.ok) throw new Error(`教学图片已经生成，但下载失败（HTTP ${imageResponse.status}）。`)
     base64 = arrayBufferToBase64(await imageResponse.arrayBuffer())
   }

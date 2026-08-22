@@ -40,4 +40,41 @@ describe("teaching image generation", () => {
     })
     expect(mocks.write).toHaveBeenCalledWith(expect.stringContaining("/.llm-wiki/learning/visuals/"), "new-image")
   })
+
+  it("uses the native Alibaba request for qwen-image-3.0 and caches the returned image", async () => {
+    mocks.fetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          output: { choices: [{ message: { content: [{ image: "https://example.com/qwen.png" }] } }] },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: () => Promise.resolve(new Uint8Array([1, 2, 3]).buffer),
+      })
+
+    const result = await generateTeachingImage({
+      projectPath: "C:/project",
+      fingerprint: "qwen-source",
+      prompt: "并联电路知识关系图",
+      config: {
+        ...DEFAULT_TEACHING_IMAGE_CONFIG,
+        enabled: true,
+        endpoint: "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/images/generations",
+        apiKey: "sk-test",
+        model: "qwen-image-3.0",
+      },
+    })
+
+    expect(mocks.fetch.mock.calls[0][0]).toBe("https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation")
+    expect(JSON.parse(mocks.fetch.mock.calls[0][1].body)).toEqual({
+      model: "qwen-image-3.0",
+      input: { messages: [{ role: "user", content: [{ text: "并联电路知识关系图" }] }] },
+      parameters: { size: "1536*1024", n: 1, prompt_extend: false, watermark: false },
+    })
+    expect(mocks.fetch.mock.calls[1][0]).toBe("https://example.com/qwen.png")
+    expect(mocks.write).toHaveBeenCalledWith(expect.stringContaining("/.llm-wiki/learning/visuals/"), "AQID")
+    expect(result).toBe("data:image/png;base64,AQID")
+  })
 })
