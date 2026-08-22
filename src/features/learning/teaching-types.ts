@@ -21,7 +21,7 @@ export interface TeachingVisualBrief {
 }
 
 export interface TeachingLesson {
-  schemaVersion: 2
+  schemaVersion: 3
   nodeId: string
   sourceFingerprint: string
   essence: string

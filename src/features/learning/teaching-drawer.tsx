@@ -45,7 +45,11 @@ function TeachingVisual({ brief, projectPath }: { brief: TeachingVisualBrief; pr
     const controller = new AbortController()
     loadTeachingImageConfig().then(async (config) => {
       if (!config.enabled) {
-        if (!cancelled) setImageError("尚未在“设置 → 教学”中开启教学图片生成。")
+        if (!cancelled) setImageError("请到“设置 → 教学”开启图片生成。")
+        return
+      }
+      if (!config.apiKey.trim()) {
+        if (!cancelled) setImageError("请到“设置 → 教学”填写图片接口密钥。")
         return
       }
       try {
@@ -86,7 +90,7 @@ export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, l
   const markLearningStarted = useLearningStore((state) => state.markLearningStarted)
   const recordAttempt = useLearningStore((state) => state.recordAttempt)
   const session = sessionsByNode[node.id] ?? { activeStage: "locate" as const }
-  const lesson = session.lesson?.schemaVersion === 2 ? session.lesson : undefined
+  const lesson = session.lesson?.schemaVersion === 3 ? session.lesson : undefined
   const boardNodes = useMemo(() => learningBoard ? learningBoardNodes(learningBoard, nodes) : [], [learningBoard, nodes])
   const latestAttempt = useMemo(() => {
     const matching = attempts.filter((attempt) => attempt.nodeId === node.id && attempt.question === lesson?.checkQuestion)
@@ -148,38 +152,41 @@ export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, l
     <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
       {!lesson && <div className="space-y-5">
         <div className="teaching-essence"><span aria-hidden="true">{node.glyph}</span><div><div className="text-xs font-medium text-blue-700">一句精华</div><p className="mt-1 text-[15px] leading-7">{node.essence}</p></div></div>
-        <p className="text-sm leading-6 text-muted-foreground">AI 会用当前资料和已经审核的精华串，讲清关系、概念、例子与反例，然后只检验一次。</p>
+        <p className="text-sm leading-6 text-muted-foreground">核心讲解、图片、一个例子和反例，再检验一次。</p>
         <button type="button" onClick={() => void prepare()} disabled={busy !== null} className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-medium text-white disabled:opacity-50">{busy === "lesson" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}{busy === "lesson" ? "AI 正在准备讲解…" : "开始 AI 教学"}</button>
       </div>}
 
-      {lesson && <div className="space-y-7">
+      {lesson && <div className="space-y-5">
         <section>
-          <div className="text-xs font-medium text-violet-700">知识关联与关系说明</div>
-          {learningBoard ? <div className="mt-2 rounded-xl border border-violet-100 bg-violet-50/50 p-3">
-            <div className="flex items-center justify-between gap-3"><strong className="text-sm">{learningBoard.title}</strong><span className="shrink-0 text-[10px] text-violet-700">{BOARD_LABELS[learningBoard.kind].name}</span></div>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">{learningBoard.centralQuestion}</p>
-            <div className="mt-3 flex flex-wrap items-center gap-1.5">{boardNodes.map((item, index) => <span key={item.id} className="flex items-center gap-1.5"><button type="button" onClick={() => onSelect(item.id)} className={`rounded-full border px-2.5 py-1 text-xs ${item.id === node.id ? "border-blue-600 bg-blue-600 text-white" : "bg-white text-slate-700"}`}>{item.title}</button>{index < boardNodes.length - 1 && <span className="text-slate-400">{BOARD_LABELS[learningBoard.kind].connector}</span>}</span>)}</div>
-            <p className="mt-3 border-l-2 border-violet-300 pl-3 text-xs leading-5 text-slate-600">{learningBoard.mnemonic}</p>
-          </div> : <p className="mt-2 rounded-lg border px-3 py-2 text-sm leading-6 text-muted-foreground">当前没有经过审核的可靠知识串，因此不会为了凑内容强行关联。</p>}
-          <p className="mt-3 text-sm leading-7 text-foreground/80">{lesson.relationshipExplanation}</p>
-          <div className="mt-3"><TeachingVisual brief={lesson.relationshipVisual} projectPath={projectPath} /></div>
+          <div className="teaching-essence"><span aria-hidden="true">{node.glyph}</span><div><div className="text-xs font-medium text-blue-700">核心</div><p className="mt-1 text-[15px] leading-7">{lesson.essence}</p></div></div>
+          <p className="mt-3 text-sm leading-7 text-foreground/80">{lesson.explanation}</p>
+          <p className="mt-2 border-l-2 border-blue-200 pl-3 text-sm leading-6 text-foreground/70">{lesson.mechanism}</p>
         </section>
 
-        <section><div className="teaching-essence"><span aria-hidden="true">{node.glyph}</span><div><div className="text-xs font-medium text-blue-700">概念讲解</div><p className="mt-1 text-[15px] leading-7">{lesson.essence}</p></div></div><p className="mt-3 text-sm leading-7 text-foreground/80">{lesson.explanation}</p></section>
-        <section><h3 className="text-sm font-semibold">为什么会这样</h3><p className="mt-2 text-sm leading-7 text-foreground/80">{lesson.mechanism}</p></section>
-        <section className="grid gap-3 sm:grid-cols-2"><div className="rounded-xl border border-emerald-100 bg-emerald-50/50 p-3"><h3 className="text-sm font-semibold text-emerald-800">例子</h3><p className="mt-2 text-sm leading-7 text-foreground/80">{lesson.example}</p></div><div className="rounded-xl border border-amber-100 bg-amber-50/50 p-3"><h3 className="text-sm font-semibold text-amber-800">反例</h3><p className="mt-2 text-sm leading-7 text-foreground/80">{lesson.counterexample}</p></div></section>
-        <section><h3 className="mb-3 text-sm font-semibold">概念理解图</h3>{lesson.conceptVisual.kind === "none" ? <p className="rounded-lg border px-3 py-2 text-sm leading-6 text-muted-foreground">这个知识点不适合强行画图：{lesson.conceptVisual.reason}</p> : <TeachingVisual brief={lesson.conceptVisual} projectPath={projectPath} />}</section>
+        {lesson.conceptVisual.kind === "image" && <TeachingVisual brief={lesson.conceptVisual} projectPath={projectPath} />}
+
+        <section className="grid gap-3 sm:grid-cols-2"><div className="rounded-xl border border-emerald-100 bg-emerald-50/50 p-3"><h3 className="text-sm font-semibold text-emerald-800">例子</h3><p className="mt-1 text-sm leading-6 text-foreground/80">{lesson.example}</p></div><div className="rounded-xl border border-amber-100 bg-amber-50/50 p-3"><h3 className="text-sm font-semibold text-amber-800">反例</h3><p className="mt-1 text-sm leading-6 text-foreground/80">{lesson.counterexample}</p></div></section>
+
+        {learningBoard && <section>
+          <div className="text-xs font-medium text-violet-700">知识关联</div>
+          <div className="mt-2 rounded-xl border border-violet-100 bg-violet-50/50 p-3">
+            <div className="flex items-center justify-between gap-3"><strong className="text-sm">{learningBoard.title}</strong><span className="shrink-0 text-[10px] text-violet-700">{BOARD_LABELS[learningBoard.kind].name}</span></div>
+            <div className="mt-3 flex flex-wrap items-center gap-1.5">{boardNodes.map((item, index) => <span key={item.id} className="flex items-center gap-1.5"><button type="button" onClick={() => onSelect(item.id)} className={`rounded-full border px-2.5 py-1 text-xs ${item.id === node.id ? "border-blue-600 bg-blue-600 text-white" : "bg-white text-slate-700"}`}>{item.title}</button>{index < boardNodes.length - 1 && <span className="text-slate-400">{BOARD_LABELS[learningBoard.kind].connector}</span>}</span>)}</div>
+            <p className="mt-2 text-xs leading-5 text-slate-600">{lesson.relationshipExplanation}</p>
+          </div>
+          <div className="mt-3"><TeachingVisual brief={lesson.relationshipVisual} projectPath={projectPath} /></div>
+        </section>}
 
         <section className="rounded-xl border p-4">
           <div className="text-xs font-medium text-blue-700">一次轻量 AI 检验</div>
           <h3 className="mt-2 text-base font-semibold leading-7">{lesson.checkQuestion}</h3>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">用自己的话回答即可。AI 只检查这次是否讲懂，不安排之后复习。</p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">用自己的话回答。</p>
           <textarea value={draftAnswer} onChange={(event) => setDraftAnswer(event.target.value)} className="mt-3 min-h-32 w-full resize-y rounded-lg border p-3 text-sm leading-6 outline-none focus-visible:ring-2 focus-visible:ring-blue-500" placeholder="写下你的理解；不知道也可以直接写卡住的地方。" />
           <button type="button" onClick={() => void submit()} disabled={busy !== null || !draftAnswer.trim()} className="mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-medium text-white disabled:opacity-50">{busy === "judge" && <Loader2 className="h-4 w-4 animate-spin" />}{busy === "judge" ? "AI 正在核对…" : "提交给 AI 检验"}</button>
           {latestAttempt && <div className={`mt-4 rounded-xl border p-4 ${latestAttempt.evaluation.verdict === "correct" ? "border-emerald-200 bg-emerald-50/70" : "border-amber-200 bg-amber-50/70"}`}><div className="flex items-center gap-2">{latestAttempt.evaluation.verdict === "correct" ? <CheckCircle2 className="h-4 w-4 text-emerald-700" /> : <AlertTriangle className="h-4 w-4 text-amber-700" />}<strong className="text-sm">{VERDICT_LABEL[latestAttempt.evaluation.verdict]}</strong></div><p className="mt-2 text-sm leading-6">{latestAttempt.evaluation.feedback}</p>{latestAttempt.evaluation.missingPoints.length > 0 && <ul className="mt-2 list-disc pl-5 text-xs leading-5">{latestAttempt.evaluation.missingPoints.map((point) => <li key={point}>{point}</li>)}</ul>}<p className="mt-3 text-xs leading-5"><strong>现在补清楚：</strong>{latestAttempt.evaluation.nextAction}</p></div>}
         </section>
 
-        <button type="button" onClick={() => void prepare()} disabled={busy !== null} className="flex h-10 w-full items-center justify-center gap-2 rounded-lg border text-sm font-medium disabled:opacity-50">{busy === "lesson" && <Loader2 className="h-4 w-4 animate-spin" />}{busy === "lesson" ? "AI 正在重新准备…" : "重新生成这次讲解"}</button>
+        <button type="button" onClick={() => void prepare()} disabled={busy !== null} className="text-xs text-muted-foreground underline disabled:opacity-50">{busy === "lesson" ? "正在重新讲解…" : "重新讲解"}</button>
       </div>}
 
       {session.lastError && <div role="alert" className="mt-5 rounded-lg border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-800"><strong>这一步没有完成：</strong>{session.lastError}<button type="button" onClick={() => lesson && draftAnswer.trim() ? void submit() : void prepare()} className="mt-2 block font-medium underline">保留当前内容并重试</button></div>}

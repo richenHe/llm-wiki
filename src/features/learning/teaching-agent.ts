@@ -38,6 +38,19 @@ function stringValue(value: unknown, field: string): string {
   return value.trim()
 }
 
+function conciseStringValue(value: unknown, field: string, maxChars: number): string {
+  const text = stringValue(value, field)
+  if (Array.from(text).length <= maxChars) return text
+  const sentences = text.match(/[^。！？!?]+[。！？!?]?/g) ?? []
+  let result = ""
+  for (const sentence of sentences) {
+    if (Array.from(result + sentence).length > maxChars) break
+    result += sentence
+  }
+  if (result.trim()) return result.trim()
+  return `${Array.from(text).slice(0, Math.max(1, maxChars - 1)).join("").trimEnd()}…`
+}
+
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()).slice(0, 8) : []
 }
@@ -85,23 +98,23 @@ function callTeachingModel(task: "learn" | "judge", messages: ChatMessage[], sig
         settled = true
         reject(error)
       },
-    }, signal, { temperature: 0.2, max_tokens: 2800 })
+    }, signal, { temperature: 0.2, max_tokens: 1600 })
   })
 }
 
 function parseLesson(raw: string, context: TeachingContext): TeachingLesson {
   const value = extractJson(raw) as Record<string, unknown>
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     nodeId: context.node.id,
     sourceFingerprint: context.sourceFingerprint,
-    essence: stringValue(value.essence, "一句精华"),
-    explanation: stringValue(value.explanation, "通俗解释"),
-    mechanism: stringValue(value.mechanism, "核心机制"),
-    example: stringValue(value.example, "正例"),
-    counterexample: stringValue(value.counterexample, "反例或边界"),
-    relationshipExplanation: stringValue(value.relationshipExplanation, "串联关系说明"),
-    checkQuestion: stringValue(value.checkQuestion, "检查题"),
+    essence: conciseStringValue(value.essence, "一句精华", 36),
+    explanation: conciseStringValue(value.explanation, "通俗解释", 90),
+    mechanism: conciseStringValue(value.mechanism, "核心机制", 70),
+    example: conciseStringValue(value.example, "正例", 70),
+    counterexample: conciseStringValue(value.counterexample, "反例或边界", 70),
+    relationshipExplanation: conciseStringValue(value.relationshipExplanation, "串联关系说明", 80),
+    checkQuestion: conciseStringValue(value.checkQuestion, "检查题", 60),
     conceptVisual: parseVisual(value.conceptVisual, "概念理解图", `${context.sourceFingerprint}-concept-v2`, context),
     relationshipVisual: parseVisual(value.relationshipVisual, "知识关系图", `${context.learningBoardFingerprint ?? context.sourceFingerprint}-relationship-v2`, context, true),
     preparedAt: new Date().toISOString(),
@@ -110,7 +123,13 @@ function parseLesson(raw: string, context: TeachingContext): TeachingLesson {
 
 export async function prepareTeachingLesson(context: TeachingContext, signal?: AbortSignal): Promise<TeachingLesson> {
   const messages: ChatMessage[] = [
-    { role: "system", content: `你是个人知识库中的讲解老师，目标只有让普通学习者看懂当前概念。只能依据来源和已审核精华串；资料不足要直说，不能补造。不要重复知识目录位置，也不要罗列系统已有的前置基础。先说明精华串是什么关系，再讲概念本质和为什么成立，然后给一个具体正例和一个反例，最后只出一道轻量检验题；不要安排回忆、迁移、复习或延迟任务。category 是并列，绝不能写成先后；process 才是实际顺序；prerequisite 只是理解依赖。概念适合生图时选择最符合知识本身的形式，例如生物结构用形象结构示意，不要统一写成机械流程图；不适合则选 none。关系图由程序按精华串固定生成，你只提供画面重点。返回且只返回 JSON：{"essence":"一句最短本质","relationshipExplanation":"精华串关系和当前知识的作用","explanation":"通俗讲解","mechanism":"为什么会这样","example":"具体正例及对应关系","counterexample":"反例及不成立原因","checkQuestion":"一道轻量检验题","conceptVisual":{"kind":"image|none","title":"概念理解图","form":"形象结构图|过程变化图|空间关系图|对比图|数量关系图|真实场景图","focus":"画面必须看出的关键点","reason":"为什么适合或不适合用图"},"relationshipVisual":{"focus":"关系图应突出什么","reason":"为什么有帮助"}}。` },
+    { role: "system", content: `你是个人知识库中的讲解老师，目标是用最少的话让普通学习者准确看懂。只能依据来源和已审核精华串；资料不足要直说，不能补造。不要重复知识目录位置或已有前置基础。
+
+严格控制长度：essence 不超过 36 个汉字；explanation 不超过 90 个汉字，只说“是什么”；mechanism 不超过 70 个汉字，只说“为什么”；example 和 counterexample 各不超过 70 个汉字且只给一个；relationshipExplanation 不超过 80 个汉字；checkQuestion 不超过 60 个汉字。每项先说结论，不写开场、总结或重复句。
+
+category 是并列，绝不能写成先后；process 才是实际顺序；prerequisite 只是理解依赖。没有已审核精华串时，relationshipExplanation 只写“暂无可靠知识关联”，不要臆造关系。概念适合生图时选择符合知识本身的形式，例如生物结构用形象结构示意，不要统一写成机械流程图；不适合则选 none。关系图由程序按精华串固定生成，你只提供画面重点。不要安排回忆、迁移、复习或延迟任务。
+
+返回且只返回 JSON：{"essence":"一句最短本质","relationshipExplanation":"精华串关系和当前知识的作用","explanation":"是什么","mechanism":"为什么","example":"一个正例","counterexample":"一个反例及不成立原因","checkQuestion":"一道轻量检验题","conceptVisual":{"kind":"image|none","title":"概念理解图","form":"形象结构图|过程变化图|空间关系图|对比图|数量关系图|真实场景图","focus":"画面必须看出的关键点","reason":"为什么适合或不适合用图"},"relationshipVisual":{"focus":"关系图应突出什么","reason":"为什么有帮助"}}。` },
     { role: "user", content: contextText(context) },
   ]
   const raw = await callTeachingModel("learn", messages, signal)

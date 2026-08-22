@@ -63,7 +63,7 @@ describe("teaching agent", () => {
     })
     const lesson = await prepareTeachingLesson(context)
     expect(mocks.tasks).toEqual(["learn"])
-    expect(lesson.schemaVersion).toBe(2)
+    expect(lesson.schemaVersion).toBe(3)
     expect(lesson.conceptVisual.imagePrompt).toContain("生物结构用形象、准确的结构示意")
     expect(lesson.relationshipVisual.imagePrompt).toContain("同类并列关系")
     expect(lesson.relationshipVisual.imagePrompt).toContain("不画先后箭头")
@@ -76,6 +76,30 @@ describe("teaching agent", () => {
     expect(mocks.tasks).toEqual(["judge"])
     expect(result.verdict).toBe("partial")
     expect(result.missingPoints).toEqual(["失效条件"])
+  })
+
+  it("keeps every visible teaching section concise even when the model writes too much", async () => {
+    const longText = "这是第一句核心说明。".repeat(20)
+    mocks.output = JSON.stringify({
+      essence: longText,
+      relationshipExplanation: longText,
+      explanation: longText,
+      mechanism: longText,
+      example: longText,
+      counterexample: longText,
+      checkQuestion: longText,
+      conceptVisual: { kind: "none", reason: "不适合画图" },
+      relationshipVisual: { focus: "并列关系" },
+    })
+    const lesson = await prepareTeachingLesson({ ...context, learningBoard: undefined, learningBoardFingerprint: undefined, learningBoardNodes: [] })
+    expect(Array.from(lesson.essence).length).toBeLessThanOrEqual(36)
+    expect(Array.from(lesson.explanation).length).toBeLessThanOrEqual(90)
+    expect(Array.from(lesson.mechanism).length).toBeLessThanOrEqual(70)
+    expect(Array.from(lesson.example).length).toBeLessThanOrEqual(70)
+    expect(Array.from(lesson.counterexample).length).toBeLessThanOrEqual(70)
+    expect(Array.from(lesson.relationshipExplanation).length).toBeLessThanOrEqual(80)
+    expect(Array.from(lesson.checkQuestion).length).toBeLessThanOrEqual(60)
+    expect(lesson.relationshipVisual.kind).toBe("none")
   })
 
   it("rejects prose that cannot be checked instead of pretending the lesson succeeded", async () => {
