@@ -5,7 +5,6 @@ import { Matrix4, Quaternion, Vector3, type Group, type InstancedMesh, type Mesh
 import type { LearningNode, LearningRelation } from "./learning-data"
 import {
   getKnowledgeScopeCount,
-  getKnowledgeScopeIds,
   getSphereNavigationKind,
   getSphereRadius,
   type SphereNavigationKind,
@@ -101,20 +100,30 @@ function ParticleSphereLayer({
   const meshRef = useRef<InstancedMesh>(null)
   const materialRef = useRef<MeshBasicMaterial>(null)
   const startedAt = useRef<number | null>(null)
-  const viewportNodes = useMemo(
+  const visibleNodes = useMemo(
     () => selectVisibleLearningNodes(nodes, selectedNodeId, childWindowOffset, childWindowSize),
     [childWindowOffset, childWindowSize, nodes, selectedNodeId],
   )
-  const visibleNodes = useMemo(() => {
-    const scopeIds = getKnowledgeScopeIds(nodes, selectedNodeId)
-    return viewportNodes.filter((node) => scopeIds.has(node.id))
-  }, [nodes, selectedNodeId, viewportNodes])
   const sphereLayout = useMemo(() => {
     const scopeCount = getKnowledgeScopeCount(nodes, selectedNodeId)
     const particleCount = visibleNodes.length
     const radius = getSphereRadius(scopeCount)
     const seed = hashText(selectedNodeId ?? "global")
-    const points = Array.from({ length: particleCount }, (_, index) => fibonacciPoint(index, particleCount, radius, seed))
+    const surfaceNodes = selectedNodeId
+      ? visibleNodes.filter((node) => node.id !== selectedNodeId)
+      : visibleNodes
+    const surfacePoints = Array.from(
+      { length: surfaceNodes.length },
+      (_, index) => fibonacciPoint(index, surfaceNodes.length, radius, seed),
+    )
+    const pointByNodeId = new Map<string, Point>()
+    if (selectedNodeId && visibleNodes.some((node) => node.id === selectedNodeId)) {
+      pointByNodeId.set(selectedNodeId, [0, 0, 0])
+    }
+    surfaceNodes.forEach((node, index) => {
+      pointByNodeId.set(node.id, surfacePoints[index] ?? [0, 0, 0])
+    })
+    const points = visibleNodes.map((node): Point => pointByNodeId.get(node.id) ?? [0, 0, 0])
     const nodeByInstance = new Map(visibleNodes.map((node, index) => [index, node]))
     const labelPoints = new Map(visibleNodes.map((node, index) => [node.id, points[index] ?? [0, 0, 0] as Point]))
     const matrices = visibleNodes.map((node, index) => {
