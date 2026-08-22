@@ -167,9 +167,9 @@
 .knowledge-route-card {
   position: absolute;
   z-index: 36;
-  left: 288px;
+  right: 76px;
   bottom: 68px;
-  width: min(370px, calc(100% - 378px));
+  width: min(370px, calc(100% - 120px));
   border: 1px solid rgb(203 213 225 / 0.9);
   border-radius: 12px;
   background: rgb(255 255 255 / 0.96);
@@ -211,7 +211,7 @@
 .knowledge-route-launcher {
   position: absolute;
   z-index: 37;
-  left: 288px;
+  right: 76px;
   bottom: 18px;
   display: flex;
   height: 38px;
@@ -261,8 +261,8 @@
 
 @media (max-width: 900px) {
   .knowledge-path-panel { width: 220px; }
-  .knowledge-route-card { left: 18px; right: 64px; width: auto; }
-  .knowledge-route-launcher { left: 18px; }
+  .knowledge-route-card { left: 18px; right: 76px; width: auto; }
+  .knowledge-route-launcher { right: 76px; max-width: calc(100% - 94px); }
   .knowledge-atlas-header nav { display: none; }
   .knowledge-atlas-header { padding-inline: 12px; }
   .teaching-drawer { width: min(430px, calc(100% - 24px)); }

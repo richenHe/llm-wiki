@@ -469,7 +469,7 @@ export function LearningView() {
             {routeSnapshot?.status === "ready" && availableRouteBoards.length === 0 && <p className="mt-2 text-xs leading-5 text-muted-foreground">全部 {routeProgress.total} 个知识点已经处理；AI 没有发现证据充分的串联，因此没有强行生成。</p>}
           </section>
         )}
-        {!routePanelOpen && routeNode && routeBoard && <div className="absolute bottom-5 right-20 z-20 flex items-center gap-2 rounded-md border bg-white/90 px-3 py-2 text-[11px] text-muted-foreground"><Eye className="h-3.5 w-3.5" />此知识点已有精华串联，点击左下角查看</div>}
+        {!routePanelOpen && routeNode && routeBoard && <div className="absolute bottom-16 right-[76px] z-20 flex items-center gap-2 rounded-md border bg-white/90 px-3 py-2 text-[11px] text-muted-foreground"><Eye className="h-3.5 w-3.5" />此知识点已有精华串联，点击右下角查看</div>}
         {atlasLoading && <div className="absolute inset-0 z-40 flex items-center justify-center bg-white/70 text-sm text-muted-foreground">正在整理当前知识库的结构…</div>}
         {!atlasLoading && !atlas.isSample && atlas.totalConcepts === 0 && <div className="absolute inset-0 z-20 flex items-center justify-center"><div className="max-w-sm rounded-xl border bg-white p-6 text-center shadow-sm"><BookOpen className="mx-auto h-6 w-6 text-slate-400" /><div className="mt-3 text-base font-semibold">知识库还没有可绘制的知识页</div><p className="mt-2 text-sm leading-6 text-muted-foreground">请先导入资料并完成知识生成。生成后的页面和章节会自动进入知识球。</p></div></div>}
 
