@@ -349,7 +349,7 @@ export function LearningView() {
         <div aria-hidden="true" className="knowledge-canvas-grid" />
         <PathTree nodes={activeNodes} selectedNodeId={focusNodeId} onSelect={navigateTo} />
 
-        <main className="absolute inset-0 overflow-hidden" aria-label="镂空知识球工作区" onWheel={handleWheel}>
+        <main className="absolute inset-0 overflow-hidden" aria-label="粒子知识球工作区" onWheel={handleWheel}>
           <div className="absolute inset-0 transition-transform duration-200 motion-reduce:transition-none" style={{ transform: `scale(${zoom})` }}>
             <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-muted-foreground">正在加载三维知识球…</div>}>
               <HollowKnowledgeSphere nodes={activeNodes} relations={atlas.relations} selectedNodeId={focusNodeId} childWindowOffset={childWindowOffset} reduceMotion={reduceMotion} onSelectNode={navigateTo} onHoverNode={setHoveredNodeId} />
