@@ -16,8 +16,13 @@ export interface LearningRouteProjectRef {
 
 const INCLUDED_TYPES = new Set(["concept", "entity", "comparison"])
 const ROUTE_GENERATOR_VERSION = 3
+const STALE_RETRY_DELAY_MS = 20_000
 const scheduledTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const activeControllers = new Map<string, AbortController>()
+
+export function learningRoutesNeedRetry(snapshot: LearningRouteSnapshot): boolean {
+  return snapshot.status === "stale" || snapshot.progress.processed < snapshot.progress.total
+}
 
 function normalizedProjectPath(path: string): string {
   return normalizePath(path).replace(/\/+$/, "")
@@ -287,15 +292,21 @@ async function runScheduledRefresh(project: LearningRouteProjectRef): Promise<vo
   }
   const controller = new AbortController()
   activeControllers.set(key, controller)
+  let shouldRetry = false
   try {
     if (!isCurrentProject(project)) return
-    await refreshLearningRoutes(project, controller.signal)
+    const snapshot = await refreshLearningRoutes(project, controller.signal)
+    shouldRetry = learningRoutesNeedRetry(snapshot)
     emitUpdated(project.path)
   } catch (error) {
-    if (!controller.signal.aborted) console.error("[learning-routes] refresh failed", error)
+    if (!controller.signal.aborted) {
+      shouldRetry = true
+      console.error("[learning-routes] refresh failed", error)
+    }
   } finally {
     if (activeControllers.get(key) === controller) activeControllers.delete(key)
   }
+  if (shouldRetry && isCurrentProject(project)) scheduleLearningRouteRefresh(project, STALE_RETRY_DELAY_MS)
 }
 
 export function scheduleLearningRouteRefresh(
@@ -309,7 +320,7 @@ export function scheduleLearningRouteRefresh(
   if (active) active.abort()
   const timer = setTimeout(() => {
     scheduledTimers.delete(key)
-    void runScheduledRefresh(project)
+    return runScheduledRefresh(project)
   }, Math.max(0, delayMs))
   scheduledTimers.set(key, timer)
 }

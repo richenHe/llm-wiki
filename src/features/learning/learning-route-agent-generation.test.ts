@@ -90,4 +90,61 @@ describe("learning route exhaustive AI processing", () => {
       expect.objectContaining({ nodeId: "equation", status: "linked" }),
     ])
   })
+
+  it("falls back to one-by-one audits when a multi-board audit keeps omitting results", async () => {
+    const candidates: LearningRouteCandidate[] = Array.from({ length: 6 }, (_, index) => ({
+      id: `node-${index}`,
+      title: `知识${index}`,
+      semanticType: "concept",
+      summary: `知识${index}摘要`,
+      sourcePath: `知识${index}.md`,
+      outline: [],
+      neighborIds: [],
+      content: `知识${index}详情`,
+    }))
+    const proposals = [0, 2, 4].map((index) => ({
+      title: `板块${index / 2 + 1}`,
+      centralQuestion: `知识${index}和知识${index + 1}有什么共同点？`,
+      kind: "category",
+      nodeIds: [`node-${index}`, `node-${index + 1}`],
+      orderedNodeIds: [`node-${index}`, `node-${index + 1}`],
+      reason: "使用同一分类标准的并列项。",
+      confidence: 0.9,
+    }))
+    const completeSingleReview = (messages: Array<{ content: string }>) => {
+      const user = messages[messages.length - 1].content
+      const serialized = user.match(/候选板块：\n([\s\S]*?)\n\n对应知识详情/)?.[1] ?? "[]"
+      const proposal = (JSON.parse(serialized) as Array<Record<string, unknown>>)[0]
+      const nodeIds = proposal.nodeIds as string[]
+      return {
+        reviews: [{
+          ...proposal,
+          approved: true,
+          evidence: nodeIds.map((nodeId) => ({ nodeId, detail: `${nodeId}的详情支持这一并列关系。` })),
+          mnemonic: nodeIds.join("并"),
+          mnemonicParts: nodeIds.map((nodeId) => ({ nodeId, phrase: nodeId })),
+        }],
+      }
+    }
+    mocks.responses.push(
+      {
+        boards: proposals,
+        decisions: candidates.map((candidate) => ({ nodeId: candidate.id, status: "proposed", reason: "进入候选板块。" })),
+      },
+      { reviews: [] },
+      { reviews: [] },
+      completeSingleReview,
+      completeSingleReview,
+      completeSingleReview,
+    )
+
+    const result = await generateReviewedLearningBoards({
+      candidates,
+      config: { provider: "openai", apiKey: "test", model: "test-model", ollamaUrl: "", customEndpoint: "", maxContextSize: 32_768 },
+    })
+
+    expect(mocks.calls).toBe(6)
+    expect(result.boards).toHaveLength(3)
+    expect(result.decisions.every((decision) => decision.status === "linked")).toBe(true)
+  })
 })

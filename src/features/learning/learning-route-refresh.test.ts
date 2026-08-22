@@ -17,6 +17,7 @@ vi.mock("@/lib/has-usable-llm", () => ({ hasUsableLlm: () => true }))
 vi.mock("@/lib/llm-task-routing", () => ({
   getTaskLlmConfig: () => ({ provider: "openai", apiKey: "key", model: "route-model" }),
 }))
+vi.mock("@/lib/ingest-queue", () => ({ getQueueSummary: () => ({ pending: 0, processing: 0 }) }))
 vi.mock("@/lib/wiki-graph", () => ({
   buildWikiGraph: vi.fn(async () => ({
     nodes: [
@@ -38,7 +39,7 @@ vi.mock("./learning-route-persistence", () => ({
   }),
 }))
 
-import { refreshLearningRoutes } from "./learning-route-refresh"
+import { learningRoutesNeedRetry, refreshLearningRoutes } from "./learning-route-refresh"
 
 const BOARD: LearningBoard = {
   id: "genetics",
@@ -104,5 +105,15 @@ describe("learning route refresh", () => {
     expect(result.status).toBe("stale")
     expect(result.communities[0].boards).toEqual([BOARD])
     expect(result.communities[0].lastError).toContain("model unavailable")
+  })
+
+  it("keeps retrying incomplete snapshots and stops retrying a complete one", async () => {
+    mocks.generate.mockRejectedValueOnce(new Error("temporary omission"))
+    const incomplete = await refreshLearningRoutes({ id: "project-1", path: "D:/kb" })
+    expect(learningRoutesNeedRetry(incomplete)).toBe(true)
+
+    mocks.generate.mockResolvedValue({ boards: [BOARD], decisions: DECISIONS })
+    const complete = await refreshLearningRoutes({ id: "project-1", path: "D:/kb" })
+    expect(learningRoutesNeedRetry(complete)).toBe(false)
   })
 })

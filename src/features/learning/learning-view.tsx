@@ -378,13 +378,6 @@ export function LearningView() {
     if (!routePinned) setHoveredNodeId(null)
   }
 
-  const openRouteBoard = (board: LearningBoard) => {
-    const firstNode = learningBoardNodes(board, activeNodes)[0]
-    if (!firstNode) return
-    navigateTo(firstNode.id)
-    setRoutePinned(true)
-  }
-
   const returnToGlobal = () => {
     setFocusNodeId(null)
     setHoveredNodeId(null)
@@ -456,9 +449,11 @@ export function LearningView() {
           <Sparkles className="h-4 w-4 text-violet-600" />
           <span className="font-medium text-slate-800">精华串联</span>
           <span className="text-[10px] text-muted-foreground">
-            {!routeSnapshot || routeSnapshot.status === "processing"
-              ? routeProgress.total > 0 ? `${routeProgress.processed}/${routeProgress.total}` : "AI 生成中"
-              : availableRouteBoards.length > 0 ? `${availableRouteBoards.length} 个板块` : "暂无可靠板块"}
+            {!routeSnapshot
+              ? "AI 生成中"
+              : routeSnapshot.status === "ready"
+                ? `${availableRouteBoards.length} 串`
+                : `${routeProgress.processed}/${routeProgress.total} · ${availableRouteBoards.length} 串`}
           </span>
         </button>
 
@@ -468,20 +463,10 @@ export function LearningView() {
             <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">AI 审核后的知识板块</div>
             <h2 className="mt-1 text-sm font-semibold text-slate-800">精华串联</h2>
             {!routeSnapshot && <p className="mt-2 text-xs leading-5 text-muted-foreground">AI 正在根据每个知识点的详情判断同类板块、实际流程和学习前置关系。生成完成后会自动保存，不会用目录顺序强行串联。</p>}
-            {routeSnapshot?.status === "processing" && <p className="mt-2 text-xs leading-5 text-muted-foreground">AI 正在后台逐项处理，已完成 {routeProgress.processed}/{routeProgress.total} 个知识点。页面可以继续使用，全部完成后会通知你。</p>}
-            {routeSnapshot?.status === "stale" && <p className="mt-2 text-xs leading-5 text-muted-foreground">本轮更新尚未完成，旧串联会继续保留；没有足够证据的知识点不会强行加入。</p>}
-            {routeSnapshot?.status === "ready" && availableRouteBoards.length === 0 && <p className="mt-2 text-xs leading-5 text-muted-foreground">AI 审核后暂时没有发现证据充分的板块或顺序，因此没有生成勉强的串联。</p>}
-            {availableRouteBoards.length > 0 && (
-              <div className="mt-3 space-y-2">
-                <p className="text-xs leading-5 text-muted-foreground">当前知识点不在可靠串联中，可选择其他已审核板块：</p>
-                {availableRouteBoards.slice(0, 6).map((board) => (
-                  <button key={board.id} type="button" onClick={() => openRouteBoard(board)} className="block w-full rounded-md border px-3 py-2 text-left hover:bg-slate-50">
-                    <span className="block text-xs font-medium text-slate-800">{board.title}</span>
-                    <span className="mt-0.5 block text-[10px] text-muted-foreground">{BOARD_LABELS[board.kind].title} · {board.nodeIds.length} 个知识点</span>
-                  </button>
-                ))}
-              </div>
-            )}
+            {routeSnapshot?.status === "processing" && <p className="mt-2 text-xs leading-5 text-muted-foreground">已处理 {routeProgress.processed}/{routeProgress.total} 个知识点，当前已生成 {availableRouteBoards.length} 串。AI 正在后台继续处理，全部完成后会通知你。</p>}
+            {routeSnapshot?.status === "stale" && <p className="mt-2 text-xs leading-5 text-muted-foreground">已处理 {routeProgress.processed}/{routeProgress.total} 个知识点，剩余 {Math.max(0, routeProgress.total - routeProgress.processed)} 个正在自动重试；当前已生成 {availableRouteBoards.length} 串。</p>}
+            {routeSnapshot?.status === "ready" && availableRouteBoards.length > 0 && <p className="mt-2 text-xs leading-5 text-muted-foreground">全部 {routeProgress.total} 个知识点已经处理，共生成 {availableRouteBoards.length} 串。</p>}
+            {routeSnapshot?.status === "ready" && availableRouteBoards.length === 0 && <p className="mt-2 text-xs leading-5 text-muted-foreground">全部 {routeProgress.total} 个知识点已经处理；AI 没有发现证据充分的串联，因此没有强行生成。</p>}
           </section>
         )}
         {!routePanelOpen && routeNode && routeBoard && <div className="absolute bottom-5 right-20 z-20 flex items-center gap-2 rounded-md border bg-white/90 px-3 py-2 text-[11px] text-muted-foreground"><Eye className="h-3.5 w-3.5" />此知识点已有精华串联，点击左下角查看</div>}

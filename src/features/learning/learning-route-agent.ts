@@ -354,12 +354,13 @@ function chunkProposalsForAudit(
   proposals: readonly BoardProposal[],
   candidatesById: ReadonlyMap<string, LearningRouteCandidate>,
 ): BoardProposal[][] {
+  const maxProposalsPerChunk = 3
   const chunks: BoardProposal[][] = []
   let current: BoardProposal[] = []
   let currentSize = 0
   for (const proposal of proposals) {
     const size = proposal.nodeIds.reduce((total, id) => total + detailText(candidatesById.get(id)!).length, 0) + JSON.stringify(proposal).length
-    if (current.length > 0 && currentSize + size > MAX_AUDIT_INPUT_CHARS) {
+    if (current.length > 0 && (current.length >= maxProposalsPerChunk || currentSize + size > MAX_AUDIT_INPUT_CHARS)) {
       chunks.push(current)
       current = []
       currentSize = 0
@@ -431,7 +432,7 @@ export async function generateReviewedLearningBoards(input: {
   const candidatesById = new Map(input.candidates.map((candidate) => [candidate.id, candidate]))
   const reviewed: LearningBoard[] = []
   const auditReasons = new Map<string, string[]>()
-  for (const chunk of chunkProposalsForAudit(proposals, candidatesById)) {
+  const auditChunk = async (chunk: readonly BoardProposal[]): Promise<boolean> => {
     const detailIds = [...new Set(chunk.flatMap((proposal) => proposal.nodeIds))]
     const details = detailIds.map((id) => detailText(candidatesById.get(id)!)).join("\n")
     const auditable = chunk.map((proposal) => ({ proposalId: stableBoardId(proposal), ...proposal }))
@@ -486,7 +487,14 @@ export async function generateReviewedLearningBoards(input: {
       }
       complete = true
     }
-    if (!complete) throw new Error(`独立审核未逐项处理全部 ${chunk.length} 个候选板块。`)
+    return complete
+  }
+  for (const chunk of chunkProposalsForAudit(proposals, candidatesById)) {
+    if (await auditChunk(chunk)) continue
+    if (chunk.length === 1) throw new Error("独立审核未处理当前候选板块。")
+    for (const proposal of chunk) {
+      if (!await auditChunk([proposal])) throw new Error("独立审核逐项补审时仍未处理当前候选板块。")
+    }
   }
   const unique = new Map<string, LearningBoard>()
   for (const board of reviewed) {
