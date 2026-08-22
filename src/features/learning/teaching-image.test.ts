@@ -71,7 +71,13 @@ describe("teaching image generation", () => {
     expect(JSON.parse(mocks.fetch.mock.calls[0][1].body)).toEqual({
       model: "qwen-image-3.0",
       input: { messages: [{ role: "user", content: [{ text: "并联电路知识关系图" }] }] },
-      parameters: { size: "1536*1024", n: 1, prompt_extend: false, watermark: false },
+      parameters: {
+        size: "1536*1024",
+        n: 1,
+        prompt_extend: false,
+        watermark: false,
+        negative_prompt: "文字，中文，英文，数字，公式，标题，说明，标签，水印，卡片，表格，笔记，思维导图，流程图，关系图，信息图，网页，软件界面，截图，排版海报",
+      },
     })
     expect(mocks.fetch.mock.calls[1][0]).toBe("https://example.com/qwen.png")
     expect(mocks.write).toHaveBeenCalledWith(expect.stringContaining("/.llm-wiki/learning/visuals/"), "AQID")

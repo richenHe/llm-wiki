@@ -1,5 +1,6 @@
-import { AlertTriangle, CheckCircle2, Loader2, Sparkles, X } from "lucide-react"
+import { AlertTriangle, CheckCircle2, Loader2, Sparkles, X, ZoomIn } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import { loadTeachingImageConfig } from "@/lib/project-store"
 import type { LearningMastery, LearningNode, LearningRelation } from "./learning-data"
 import type { LearningBoard } from "./learning-routes"
@@ -36,6 +37,7 @@ function friendlyTeachingError(error: unknown): string {
 function TeachingVisual({ brief, projectPath }: { brief: TeachingVisualBrief; projectPath: string }) {
   const [imageUrl, setImageUrl] = useState<string | null>(null)
   const [imageError, setImageError] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState(false)
 
   useEffect(() => {
     setImageUrl(null)
@@ -62,12 +64,35 @@ function TeachingVisual({ brief, projectPath }: { brief: TeachingVisualBrief; pr
     return () => { cancelled = true; controller.abort() }
   }, [brief, projectPath])
 
+  useEffect(() => {
+    if (!expanded) return
+    const previousOverflow = document.body.style.overflow
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpanded(false)
+    }
+    document.body.style.overflow = "hidden"
+    window.addEventListener("keydown", closeOnEscape)
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [expanded])
+
   if (brief.kind === "none") return null
   return <figure className="overflow-hidden rounded-xl border bg-slate-50/60 p-3">
-    {imageUrl && <img src={imageUrl} alt={`${brief.title}，AI 生成的辅助理解图`} className="max-h-80 w-full object-contain" />}
+    {imageUrl && <button type="button" onClick={() => setExpanded(true)} className="group relative block w-full overflow-hidden rounded-lg bg-white outline-none focus-visible:ring-2 focus-visible:ring-blue-500" aria-label={`放大查看${brief.title}`}>
+      <img src={imageUrl} alt={`${brief.title}，AI 生成的辅助理解图`} className="max-h-80 w-full object-contain" />
+      <span className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-md bg-slate-950/70 text-white opacity-90 shadow-sm transition-opacity group-hover:opacity-100" aria-hidden="true"><ZoomIn className="h-4 w-4" /></span>
+    </button>}
     {!imageUrl && !imageError && <div className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />正在生成{brief.title}…</div>}
     {!imageUrl && imageError && <p className="text-sm leading-6 text-amber-700">图片暂未生成：{imageError}</p>}
-    <figcaption className="mt-2 text-xs leading-5 text-muted-foreground">AI 辅助理解图，不作为知识依据 · {brief.reason}</figcaption>
+    <figcaption className="mt-2 text-xs leading-5 text-muted-foreground">AI 形象辅助图，不作为知识依据{imageUrl ? " · 点击图片放大" : ""}</figcaption>
+    {expanded && imageUrl && createPortal(<div data-teaching-image-lightbox role="dialog" aria-modal="true" aria-label={`放大查看${brief.title}`} className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-950/90 p-5" onClick={() => setExpanded(false)}>
+      <div className="relative flex max-h-full max-w-full items-center justify-center" onClick={(event) => event.stopPropagation()}>
+        <img src={imageUrl} alt={`${brief.title}，放大后的 AI 生成辅助理解图`} className="max-h-[calc(100vh-40px)] max-w-[calc(100vw-40px)] object-contain" />
+        <button type="button" autoFocus onClick={() => setExpanded(false)} className="absolute right-2 top-2 flex h-10 w-10 items-center justify-center rounded-md bg-slate-950/75 text-white shadow-lg outline-none hover:bg-slate-950 focus-visible:ring-2 focus-visible:ring-white" aria-label="关闭大图"><X className="h-5 w-5" /></button>
+      </div>
+    </div>, document.body)}
   </figure>
 }
 
@@ -102,7 +127,9 @@ export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, l
   useEffect(() => () => controllerRef.current?.abort(), [])
   useEffect(() => { controllerRef.current?.abort(); setBusy(null) }, [node.id])
   useEffect(() => {
-    const handleEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose() }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !document.querySelector("[data-teaching-image-lightbox]")) onClose()
+    }
     window.addEventListener("keydown", handleEscape)
     return () => window.removeEventListener("keydown", handleEscape)
   }, [onClose])
@@ -171,10 +198,9 @@ export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, l
           <div className="text-xs font-medium text-violet-700">知识关联</div>
           <div className="mt-2 rounded-xl border border-violet-100 bg-violet-50/50 p-3">
             <div className="flex items-center justify-between gap-3"><strong className="text-sm">{learningBoard.title}</strong><span className="shrink-0 text-[10px] text-violet-700">{BOARD_LABELS[learningBoard.kind].name}</span></div>
-            <div className="mt-3 flex flex-wrap items-center gap-1.5">{boardNodes.map((item, index) => <span key={item.id} className="flex items-center gap-1.5"><button type="button" onClick={() => onSelect(item.id)} className={`rounded-full border px-2.5 py-1 text-xs ${item.id === node.id ? "border-blue-600 bg-blue-600 text-white" : "bg-white text-slate-700"}`}>{item.title}</button>{index < boardNodes.length - 1 && <span className="text-slate-400">{BOARD_LABELS[learningBoard.kind].connector}</span>}</span>)}</div>
+            <div className="mt-3 flex flex-wrap items-center gap-1.5">{boardNodes.map((item, index) => <span key={item.id} className="flex items-center gap-1.5"><button type="button" onClick={() => onSelect(item.id)} className={item.id === node.id ? "rounded-full border border-blue-600 bg-blue-600 px-2.5 py-1 text-xs text-white" : "rounded-full border bg-white px-2.5 py-1 text-xs text-slate-700"}>{item.title}</button>{index < boardNodes.length - 1 && <span className="text-slate-400">{BOARD_LABELS[learningBoard.kind].connector}</span>}</span>)}</div>
             <p className="mt-2 text-xs leading-5 text-slate-600">{lesson.relationshipExplanation}</p>
           </div>
-          <div className="mt-3"><TeachingVisual brief={lesson.relationshipVisual} projectPath={projectPath} /></div>
         </section>}
 
         <section className="rounded-xl border p-4">

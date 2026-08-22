@@ -49,7 +49,7 @@ const context: TeachingContext = {
 describe("teaching agent", () => {
   beforeEach(() => { mocks.output = ""; mocks.tasks.length = 0 })
 
-  it("prepares one simple lesson with concept and relationship image rules", async () => {
+  it("prepares one simple lesson with a text-free concept image and no relationship image", async () => {
     mocks.output = JSON.stringify({
       essence: "缓存就是把旧结果先放在手边。",
       relationshipExplanation: "缓存和存储是回答同一问题的两种并列方式，没有先后顺序。",
@@ -59,14 +59,14 @@ describe("teaching agent", () => {
       counterexample: "数据库长期保存原始订单，不是缓存。",
       checkQuestion: "缓存与存储是什么关系，缓存为什么能加快访问？",
       conceptVisual: { kind: "image", form: "真实场景图", focus: "旧结果被再次取用", reason: "帮助看出复用" },
-      relationshipVisual: { focus: "缓存与存储并列", reason: "看清二者区别" },
     })
     const lesson = await prepareTeachingLesson(context)
     expect(mocks.tasks).toEqual(["learn"])
     expect(lesson.schemaVersion).toBe(3)
-    expect(lesson.conceptVisual.imagePrompt).toContain("生物结构用形象、准确的结构示意")
-    expect(lesson.relationshipVisual.imagePrompt).toContain("同类并列关系")
-    expect(lesson.relationshipVisual.imagePrompt).toContain("不画先后箭头")
+    expect(lesson.conceptVisual.imagePrompt).toContain("禁止出现任何可读文字")
+    expect(lesson.conceptVisual.imagePrompt).toContain("禁止知识卡片、表格、笔记、思维导图、流程图、关系图、信息图")
+    expect(lesson.relationshipVisual.kind).toBe("none")
+    expect(lesson.relationshipVisual.imagePrompt).toBeUndefined()
     expect(lesson.checkQuestion).toContain("缓存")
   })
 

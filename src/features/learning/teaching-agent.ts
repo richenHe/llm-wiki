@@ -55,23 +55,12 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()).slice(0, 8) : []
 }
 
-function parseVisual(value: unknown, field: string, cacheFingerprint: string, context: TeachingContext, relationship = false): TeachingVisualBrief {
+function parseVisual(value: unknown, field: string, cacheFingerprint: string, context: TeachingContext): TeachingVisualBrief {
   const visual = value && typeof value === "object" ? value as Record<string, unknown> : {}
   const focus = typeof visual.focus === "string" ? visual.focus.trim() : ""
   const form = typeof visual.form === "string" ? visual.form.trim() : "清晰教学示意图"
-  const kind = relationship
-    ? context.learningBoard ? "image" : "none"
-    : visual.kind === "image" ? "image" : "none"
-  const relationshipRule = context.learningBoard?.kind === "category"
-    ? "这是同类并列关系，使用并列分区或共同上位概念，不画先后箭头。"
-    : context.learningBoard?.kind === "process"
-      ? "这是实际流程关系，按已审核顺序画单向步骤箭头。"
-      : context.learningBoard?.kind === "prerequisite"
-        ? "这是学习前置关系，箭头只表示先学什么、后学什么，不冒充实际流程。"
-        : "当前没有已审核串联，不要添加知识关系或箭头。"
-  const generatedPrompt = relationship
-    ? `为普通学习者制作一张“知识关系图”。${relationshipRule}板块：${context.learningBoard?.title ?? "无可靠串联"}。中心问题：${context.learningBoard?.centralQuestion ?? "无"}。节点：${context.learningBoardNodes.map((node) => `${node.title}${node.id === context.node.id ? "（当前知识，需突出）" : ""}`).join("、") || context.node.title}。画面重点：${focus || "准确显示已审核关系"}。固定要求：只使用列出的节点，不新增、不合并、不改名；并列不能画成顺序，过程不能画成分类，理解前置不能冒充真实因果；主要依靠位置、连线、箭头或分支表达，中文只保留节点名和必要关系短语，不放大段说明；不要品牌、装饰背景或水印。`
-    : `为普通学习者制作一张“概念理解图”。主题：${context.node.title}。概念本质：${context.node.essence}。采用视觉形式：${form}。画面重点：${focus || context.node.essence}。固定要求：根据知识本身选择画法；生物结构用形象、准确的结构示意，物理或化学过程用变化与作用关系，电路用规范线路和路径，数学用几何、坐标或数量关系，抽象概念用贴近事实的场景或对比；图片必须帮助看懂概念，不能只是装饰或大段文字海报；只能表现来源支持的内容，不补造结构、步骤、因果或数据；中文只保留必要短标签，不要品牌、标题栏或水印。来源依据：${context.sourceExcerpt.slice(0, 4_000)}`
+  const kind = visual.kind === "image" ? "image" : "none"
+  const generatedPrompt = `为普通学习者制作一张只靠画面帮助理解的“概念形象图”。主题：${context.node.title}。概念本质：${context.node.essence}。采用视觉形式：${form}。画面必须直观看出：${focus || context.node.essence}。固定要求：根据知识本身选择真实、准确的视觉表达；生物用形象结构或生命现象，物理和化学用物体、装置、现象或变化过程，电路用规范元件和真实电流路径，数学用无文字坐标轴、曲线、几何形状或数量关系，抽象概念用具体场景或鲜明对比。禁止出现任何可读文字，包括中文、英文、数字、公式、标题、说明、标签和水印；禁止知识卡片、表格、笔记、思维导图、流程图、关系图、信息图、网页或软件界面截图。画面不是文字排版，不能用大段留白承载说明。只能表现来源支持的内容，不补造结构、步骤、因果或数据。来源依据：${context.sourceExcerpt.slice(0, 4_000)}`
   const imagePrompt = kind === "image" ? generatedPrompt : undefined
   return {
     kind,
@@ -115,8 +104,13 @@ function parseLesson(raw: string, context: TeachingContext): TeachingLesson {
     counterexample: conciseStringValue(value.counterexample, "反例或边界", 70),
     relationshipExplanation: conciseStringValue(value.relationshipExplanation, "串联关系说明", 80),
     checkQuestion: conciseStringValue(value.checkQuestion, "检查题", 60),
-    conceptVisual: parseVisual(value.conceptVisual, "概念理解图", `${context.sourceFingerprint}-concept-v2`, context),
-    relationshipVisual: parseVisual(value.relationshipVisual, "知识关系图", `${context.learningBoardFingerprint ?? context.sourceFingerprint}-relationship-v2`, context, true),
+    conceptVisual: parseVisual(value.conceptVisual, "概念形象图", `${context.sourceFingerprint}-concept-v3`, context),
+    relationshipVisual: {
+      kind: "none",
+      title: "知识关系",
+      reason: "知识关系由已审核精华串直接展示，不重复生成文字图片。",
+      cacheFingerprint: `${context.learningBoardFingerprint ?? context.sourceFingerprint}-relationship-disabled-v1`,
+    },
     preparedAt: new Date().toISOString(),
   }
 }
@@ -127,9 +121,9 @@ export async function prepareTeachingLesson(context: TeachingContext, signal?: A
 
 严格控制长度：essence 不超过 36 个汉字；explanation 不超过 90 个汉字，只说“是什么”；mechanism 不超过 70 个汉字，只说“为什么”；example 和 counterexample 各不超过 70 个汉字且只给一个；relationshipExplanation 不超过 80 个汉字；checkQuestion 不超过 60 个汉字。每项先说结论，不写开场、总结或重复句。
 
-category 是并列，绝不能写成先后；process 才是实际顺序；prerequisite 只是理解依赖。没有已审核精华串时，relationshipExplanation 只写“暂无可靠知识关联”，不要臆造关系。概念适合生图时选择符合知识本身的形式，例如生物结构用形象结构示意，不要统一写成机械流程图；不适合则选 none。关系图由程序按精华串固定生成，你只提供画面重点。不要安排回忆、迁移、复习或延迟任务。
+category 是并列，绝不能写成先后；process 才是实际顺序；prerequisite 只是理解依赖。没有已审核精华串时，relationshipExplanation 只写“暂无可靠知识关联”，不要臆造关系。只允许生成一张帮助看见概念的形象图片：生物用结构或生命现象，物理和化学用物体、装置、现象或变化，数学用曲线、形状和空间数量关系，抽象概念用具体场景或对比。禁止让图片承载文字讲义、公式笔记、知识卡片、表格、思维导图、流程图、关系图或信息图；无法脱离文字表达的概念选择 none。知识关系只用精华串展示，不生成关系图片。不要安排回忆、迁移、复习或延迟任务。
 
-返回且只返回 JSON：{"essence":"一句最短本质","relationshipExplanation":"精华串关系和当前知识的作用","explanation":"是什么","mechanism":"为什么","example":"一个正例","counterexample":"一个反例及不成立原因","checkQuestion":"一道轻量检验题","conceptVisual":{"kind":"image|none","title":"概念理解图","form":"形象结构图|过程变化图|空间关系图|对比图|数量关系图|真实场景图","focus":"画面必须看出的关键点","reason":"为什么适合或不适合用图"},"relationshipVisual":{"focus":"关系图应突出什么","reason":"为什么有帮助"}}。` },
+返回且只返回 JSON：{"essence":"一句最短本质","relationshipExplanation":"精华串关系和当前知识的作用","explanation":"是什么","mechanism":"为什么","example":"一个正例","counterexample":"一个反例及不成立原因","checkQuestion":"一道轻量检验题","conceptVisual":{"kind":"image|none","title":"概念形象图","form":"形象结构图|现象场景图|过程变化图|空间关系图|对比图|数量关系图","focus":"不靠文字也必须看出的关键点","reason":"为什么适合或不适合用形象图"}}。` },
     { role: "user", content: contextText(context) },
   ]
   const raw = await callTeachingModel("learn", messages, signal)

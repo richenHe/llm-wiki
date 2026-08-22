@@ -107,6 +107,7 @@ export async function generateTeachingImage(input: {
           n: 1,
           prompt_extend: false,
           watermark: false,
+          negative_prompt: "文字，中文，英文，数字，公式，标题，说明，标签，水印，卡片，表格，笔记，思维导图，流程图，关系图，信息图，网页，软件界面，截图，排版海报",
         },
       }
     : {
