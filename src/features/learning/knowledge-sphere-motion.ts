@@ -54,10 +54,6 @@ export function getKnowledgeScopeCount(nodes: readonly LearningNode[], selectedN
   return Math.max(getKnowledgeScopeIds(nodes, selectedNodeId).size, 1)
 }
 
-export function getSphereParticleCount(knowledgeCount: number, visibleCount: number): number {
-  return Math.max(visibleCount, Math.min(720, Math.max(64, Math.round(knowledgeCount))))
-}
-
 export function getSphereRadius(knowledgeCount: number): number {
   const growth = Math.log2(Math.max(knowledgeCount, 1) + 1) / 10
   return 2.18 + Math.min(1.18, growth * 1.42)

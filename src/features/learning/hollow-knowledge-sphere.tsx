@@ -7,7 +7,6 @@ import {
   getKnowledgeScopeCount,
   getKnowledgeScopeIds,
   getSphereNavigationKind,
-  getSphereParticleCount,
   getSphereRadius,
   type SphereNavigationKind,
 } from "./knowledge-sphere-motion"
@@ -112,26 +111,16 @@ function ParticleSphereLayer({
   }, [nodes, selectedNodeId, viewportNodes])
   const sphereLayout = useMemo(() => {
     const scopeCount = getKnowledgeScopeCount(nodes, selectedNodeId)
-    const particleCount = getSphereParticleCount(scopeCount, visibleNodes.length)
+    const particleCount = visibleNodes.length
     const radius = getSphereRadius(scopeCount)
     const seed = hashText(selectedNodeId ?? "global")
     const points = Array.from({ length: particleCount }, (_, index) => fibonacciPoint(index, particleCount, radius, seed))
-    const nodeByInstance = new Map<number, LearningNode>()
-    const labelPoints = new Map<string, Point>()
-    const occupiedSlots = new Set<number>()
-
-    visibleNodes.forEach((node, index) => {
-      let slot = Math.min(particleCount - 1, Math.floor(((index + 0.5) * particleCount) / Math.max(visibleNodes.length, 1)))
-      while (occupiedSlots.has(slot) && slot < particleCount - 1) slot += 1
-      occupiedSlots.add(slot)
-      nodeByInstance.set(slot, node)
-      labelPoints.set(node.id, points[slot] ?? [0, 0, 0])
-    })
-
-    const matrices = points.map((point, index) => {
-      const knowledgeNode = nodeByInstance.get(index)
-      const selected = knowledgeNode?.id === selectedNodeId
-      const size = selected ? 0.115 : knowledgeNode ? 0.082 : 0.055 + ((hashText(`${seed}:${index}`) % 13) / 1_000)
+    const nodeByInstance = new Map(visibleNodes.map((node, index) => [index, node]))
+    const labelPoints = new Map(visibleNodes.map((node, index) => [node.id, points[index] ?? [0, 0, 0] as Point]))
+    const matrices = visibleNodes.map((node, index) => {
+      const point = points[index] ?? [0, 0, 0]
+      const selected = node.id === selectedNodeId
+      const size = selected ? 0.13 : 0.095
       return new Matrix4().compose(new Vector3(...point), new Quaternion(), new Vector3(size, size, size))
     })
     return { labelPoints, matrices, nodeByInstance, particleCount, seed }

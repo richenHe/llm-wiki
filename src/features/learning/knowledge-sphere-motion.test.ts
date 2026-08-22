@@ -4,7 +4,6 @@ import {
   getKnowledgeScopeCount,
   getKnowledgeScopeIds,
   getSphereNavigationKind,
-  getSphereParticleCount,
   getSphereRadius,
 } from "./knowledge-sphere-motion"
 
@@ -29,10 +28,7 @@ describe("knowledge sphere motion", () => {
     expect([...getKnowledgeScopeIds(NODES, "root-a")]).toEqual(["root-a", "child-a", "leaf-a"])
   })
 
-  it("grows particle count and radius while keeping a performance ceiling", () => {
-    expect(getSphereParticleCount(4, 4)).toBe(64)
-    expect(getSphereParticleCount(257, 48)).toBe(257)
-    expect(getSphereParticleCount(2_000, 48)).toBe(720)
+  it("grows the layout radius with the amount of knowledge", () => {
     expect(getSphereRadius(257)).toBeGreaterThan(getSphereRadius(4))
   })
 })
