@@ -22,13 +22,12 @@ import {
   Play,
   Plus,
   Search,
+  Sparkles,
 } from "lucide-react"
 import { useWikiStore } from "@/stores/wiki-store"
 import {
   LEARNING_NODES,
   LEARNING_REGIONS,
-  buildLearningRoute,
-  buildRouteMnemonic,
   findLearningNode,
   getLearningBreadcrumb,
   getLearningChildren,
@@ -37,6 +36,9 @@ import {
 } from "./learning-data"
 import { loadProjectLearningAtlas, type LearningAtlas } from "./learning-atlas"
 import { loadLearningProgress, saveLearningProgress } from "./learning-persistence"
+import { loadLearningRouteSnapshot } from "./learning-route-persistence"
+import { LEARNING_ROUTES_UPDATED_EVENT } from "./learning-route-events"
+import { findBestLearningBoard, learningBoardNodes, learningBoards, learningRouteProgress, type LearningBoard, type LearningRouteSnapshot } from "./learning-routes"
 import { useLearningStore } from "./learning-store"
 import { TeachingDrawer } from "./teaching-drawer"
 
@@ -64,6 +66,39 @@ const SAMPLE_ATLAS: LearningAtlas = {
   relations: SAMPLE_RELATIONS,
   isSample: true,
   totalConcepts: LEARNING_NODES.length,
+}
+
+const SAMPLE_ROUTE_SNAPSHOT: LearningRouteSnapshot = {
+  schemaVersion: 2,
+  generatedAt: new Date(0).toISOString(),
+  model: "sample",
+  status: "ready",
+  progress: { processed: 4, total: 4 },
+  communities: [{
+    key: "sample-motion",
+    fingerprint: "sample-motion",
+    nodeIds: ["displacement", "velocity", "acceleration", "motion-graph"],
+    status: "ready",
+    boards: [{
+      id: "sample-motion-route",
+      title: "运动描述",
+      centralQuestion: "怎样逐步描述物体运动？",
+      kind: "prerequisite",
+      nodeIds: ["displacement", "velocity", "acceleration", "motion-graph"],
+      orderedNodeIds: ["displacement", "velocity", "acceleration", "motion-graph"],
+      reason: "先确定位置变化，再描述变化快慢及其变化，最后综合读取运动图像。",
+      evidence: [],
+      confidence: 1,
+      mnemonic: "位移定变化，速度看快慢，加速看速度变，图像把规律串。",
+      mnemonicParts: [],
+    }],
+    decisions: ["displacement", "velocity", "acceleration", "motion-graph"].map((nodeId) => ({
+      nodeId,
+      status: "linked" as const,
+      boardIds: ["sample-motion-route"],
+      reason: "已进入示例学习主线。",
+    })),
+  }],
 }
 
 const EMPTY_NODE: LearningNode = {
@@ -181,21 +216,30 @@ function PathTree({
   )
 }
 
-function RouteCard({ node, nodes, pinned, onTogglePin, onSelect }: {
+const BOARD_LABELS = {
+  category: { title: "同类板块 · 并列记忆", connector: "·" },
+  process: { title: "流程主线 · 实际顺序", connector: "→" },
+  prerequisite: { title: "学习主线 · 前置顺序", connector: "→" },
+} as const
+
+function RouteCard({ node, nodes, board, pinned, onTogglePin, onSelect }: {
   node: LearningNode
   nodes: readonly LearningNode[]
+  board: LearningBoard
   pinned: boolean
   onTogglePin: () => void
   onSelect: (nodeId: string) => void
 }) {
-  const route = buildLearningRoute(node.id, nodes)
+  const route = learningBoardNodes(board, nodes)
   if (route.length < 2) return null
+  const label = BOARD_LABELS[board.kind]
   return (
-    <section className="knowledge-route-card" aria-label="推荐学习路线">
+    <section id="knowledge-route-panel" className="knowledge-route-card" aria-label="推荐学习路线">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">同级主线 · 推荐顺序</div>
-          <div className="mt-1 text-xs text-muted-foreground">按前置关系与知识库目录顺序排列</div>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">{label.title}</div>
+          <div className="mt-1 text-sm font-semibold text-slate-800">{board.title}</div>
+          <div className="mt-1 text-xs leading-5 text-muted-foreground">{board.centralQuestion}</div>
         </div>
         <button type="button" onClick={onTogglePin} className="flex h-8 w-8 items-center justify-center rounded-md border bg-white hover:bg-slate-50" aria-label={pinned ? "取消固定路线" : "固定路线"}>
           {pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
@@ -205,12 +249,13 @@ function RouteCard({ node, nodes, pinned, onTogglePin, onSelect }: {
         {route.map((item, index) => (
           <span key={item.id} className="flex items-center gap-1.5">
             <button type="button" onClick={() => onSelect(item.id)} className={`route-glyph ${item.id === node.id ? "is-current" : ""}`} title={item.title}>{item.glyph}</button>
-            {index < route.length - 1 && <span className="text-slate-300">→</span>}
+            {index < route.length - 1 && <span className="text-slate-300">{label.connector}</span>}
           </span>
         ))}
       </div>
       <div className="mt-3 flex items-center gap-2 text-xs"><span className="text-muted-foreground">当前</span><strong>{node.title}</strong></div>
-      <p className="mt-2 border-l-2 border-violet-300 pl-3 text-xs leading-5 text-slate-600">{buildRouteMnemonic(route)}</p>
+      <p className="mt-2 border-l-2 border-violet-300 pl-3 text-xs leading-5 text-slate-600">{board.mnemonic}</p>
+      <p className="mt-2 text-[10px] leading-4 text-muted-foreground">AI 已根据知识详情审核 · 可信度 {Math.round(board.confidence * 100)}%</p>
     </section>
   )
 }
@@ -235,10 +280,12 @@ export function LearningView() {
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const wheelAccumulator = useRef(0)
   const [atlas, setAtlas] = useState<LearningAtlas>(SAMPLE_ATLAS)
+  const [routeSnapshot, setRouteSnapshot] = useState<LearningRouteSnapshot | null>(SAMPLE_ROUTE_SNAPSHOT)
   const [atlasLoading, setAtlasLoading] = useState(true)
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null)
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null)
   const [routePinned, setRoutePinned] = useState(false)
+  const [routePanelOpen, setRoutePanelOpen] = useState(false)
   const [childWindowOffset, setChildWindowOffset] = useState(0)
   const previewMode = typeof window !== "undefined"
     && (import.meta.env.DEV || window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost")
@@ -250,6 +297,10 @@ export function LearningView() {
   const childCount = focusNode ? getLearningChildren(focusNode.id, activeNodes).length : 0
   const routeNodeId = routePinned ? selectedNodeId : (hoveredNodeId ?? focusNodeId)
   const routeNode = routeNodeId ? activeNodes.find((item) => item.id === routeNodeId) ?? null : null
+  const routeBoard = routeNode ? findBestLearningBoard(routeSnapshot, routeNode.id) : null
+  const teachingBoard = findBestLearningBoard(routeSnapshot, node.id)
+  const availableRouteBoards = useMemo(() => learningBoards(routeSnapshot), [routeSnapshot])
+  const routeProgress = learningRouteProgress(routeSnapshot)
   const mastery = masteryByNode[node.id] ?? node.mastery
   const matches = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("zh-CN")
@@ -260,14 +311,19 @@ export function LearningView() {
   useEffect(() => {
     if (!project || previewMode) {
       setAtlas(SAMPLE_ATLAS)
+      setRouteSnapshot(SAMPLE_ROUTE_SNAPSHOT)
       setAtlasLoading(false)
       return
     }
     let cancelled = false
     setAtlasLoading(true)
-    loadProjectLearningAtlas(project.path).then((result) => {
+    Promise.all([
+      loadProjectLearningAtlas(project.path),
+      loadLearningRouteSnapshot(project.path),
+    ]).then(([result, routes]) => {
       if (cancelled) return
       setAtlas(result)
+      setRouteSnapshot(routes)
       setAtlasLoading(false)
       const current = useLearningStore.getState().selectedNodeId
       if (!result.nodes.some((item) => item.id === current)) {
@@ -283,6 +339,19 @@ export function LearningView() {
     })
     return () => { cancelled = true }
   }, [dataVersion, previewMode, project, selectNode])
+
+  useEffect(() => {
+    if (!project || previewMode) return
+    const handleRoutesUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectPath?: string }>).detail
+      if (detail?.projectPath !== project.path) return
+      loadLearningRouteSnapshot(project.path).then(setRouteSnapshot).catch((error) => {
+        console.warn("[learning] failed to reload routes", error)
+      })
+    }
+    window.addEventListener(LEARNING_ROUTES_UPDATED_EVENT, handleRoutesUpdated)
+    return () => window.removeEventListener(LEARNING_ROUTES_UPDATED_EVENT, handleRoutesUpdated)
+  }, [previewMode, project])
 
   useEffect(() => {
     if (!project) return
@@ -307,6 +376,13 @@ export function LearningView() {
     setFocusNodeId(nodeId)
     setChildWindowOffset(0)
     if (!routePinned) setHoveredNodeId(null)
+  }
+
+  const openRouteBoard = (board: LearningBoard) => {
+    const firstNode = learningBoardNodes(board, activeNodes)[0]
+    if (!firstNode) return
+    navigateTo(firstNode.id)
+    setRoutePinned(true)
   }
 
   const returnToGlobal = () => {
@@ -370,12 +446,49 @@ export function LearningView() {
           <button type="button" onClick={() => setZoom(zoom - 0.1)} className="knowledge-zoom-button" aria-label="缩小"><Minus className="h-4 w-4" /></button>
         </div>
 
-        {routeNode && <RouteCard node={routeNode} nodes={activeNodes} pinned={routePinned} onTogglePin={() => setRoutePinned((value) => !value)} onSelect={navigateTo} />}
-        {!routeNode && <div className="absolute bottom-5 right-20 z-20 flex items-center gap-2 rounded-md border bg-white/90 px-3 py-2 text-[11px] text-muted-foreground"><Eye className="h-3.5 w-3.5" />悬停知识点查看同级学习顺序</div>}
+        <button
+          type="button"
+          className={`knowledge-route-launcher ${routePanelOpen ? "is-open" : ""}`}
+          onClick={() => setRoutePanelOpen((value) => !value)}
+          aria-expanded={routePanelOpen}
+          aria-controls="knowledge-route-panel"
+        >
+          <Sparkles className="h-4 w-4 text-violet-600" />
+          <span className="font-medium text-slate-800">精华串联</span>
+          <span className="text-[10px] text-muted-foreground">
+            {!routeSnapshot || routeSnapshot.status === "processing"
+              ? routeProgress.total > 0 ? `${routeProgress.processed}/${routeProgress.total}` : "AI 生成中"
+              : availableRouteBoards.length > 0 ? `${availableRouteBoards.length} 个板块` : "暂无可靠板块"}
+          </span>
+        </button>
+
+        {routePanelOpen && routeNode && routeBoard && <RouteCard node={routeNode} nodes={activeNodes} board={routeBoard} pinned={routePinned} onTogglePin={() => setRoutePinned((value) => !value)} onSelect={navigateTo} />}
+        {routePanelOpen && (!routeNode || !routeBoard) && (
+          <section id="knowledge-route-panel" className="knowledge-route-card" aria-label="精华串联">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">AI 审核后的知识板块</div>
+            <h2 className="mt-1 text-sm font-semibold text-slate-800">精华串联</h2>
+            {!routeSnapshot && <p className="mt-2 text-xs leading-5 text-muted-foreground">AI 正在根据每个知识点的详情判断同类板块、实际流程和学习前置关系。生成完成后会自动保存，不会用目录顺序强行串联。</p>}
+            {routeSnapshot?.status === "processing" && <p className="mt-2 text-xs leading-5 text-muted-foreground">AI 正在后台逐项处理，已完成 {routeProgress.processed}/{routeProgress.total} 个知识点。页面可以继续使用，全部完成后会通知你。</p>}
+            {routeSnapshot?.status === "stale" && <p className="mt-2 text-xs leading-5 text-muted-foreground">本轮更新尚未完成，旧串联会继续保留；没有足够证据的知识点不会强行加入。</p>}
+            {routeSnapshot?.status === "ready" && availableRouteBoards.length === 0 && <p className="mt-2 text-xs leading-5 text-muted-foreground">AI 审核后暂时没有发现证据充分的板块或顺序，因此没有生成勉强的串联。</p>}
+            {availableRouteBoards.length > 0 && (
+              <div className="mt-3 space-y-2">
+                <p className="text-xs leading-5 text-muted-foreground">当前知识点不在可靠串联中，可选择其他已审核板块：</p>
+                {availableRouteBoards.slice(0, 6).map((board) => (
+                  <button key={board.id} type="button" onClick={() => openRouteBoard(board)} className="block w-full rounded-md border px-3 py-2 text-left hover:bg-slate-50">
+                    <span className="block text-xs font-medium text-slate-800">{board.title}</span>
+                    <span className="mt-0.5 block text-[10px] text-muted-foreground">{BOARD_LABELS[board.kind].title} · {board.nodeIds.length} 个知识点</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+        {!routePanelOpen && routeNode && routeBoard && <div className="absolute bottom-5 right-20 z-20 flex items-center gap-2 rounded-md border bg-white/90 px-3 py-2 text-[11px] text-muted-foreground"><Eye className="h-3.5 w-3.5" />此知识点已有精华串联，点击左下角查看</div>}
         {atlasLoading && <div className="absolute inset-0 z-40 flex items-center justify-center bg-white/70 text-sm text-muted-foreground">正在整理当前知识库的结构…</div>}
         {!atlasLoading && !atlas.isSample && atlas.totalConcepts === 0 && <div className="absolute inset-0 z-20 flex items-center justify-center"><div className="max-w-sm rounded-xl border bg-white p-6 text-center shadow-sm"><BookOpen className="mx-auto h-6 w-6 text-slate-400" /><div className="mt-3 text-base font-semibold">知识库还没有可绘制的知识页</div><p className="mt-2 text-sm leading-6 text-muted-foreground">请先导入资料并完成知识生成。生成后的页面和章节会自动进入知识球。</p></div></div>}
 
-        {detailOpen && <TeachingDrawer node={node} nodes={activeNodes} relations={atlas.relations} projectPath={project?.path ?? "preview"} mastery={mastery} onClose={() => setDetailOpen(false)} onSelect={navigateTo} />}
+        {detailOpen && <TeachingDrawer node={node} nodes={activeNodes} relations={atlas.relations} learningBoard={teachingBoard} projectPath={project?.path ?? "preview"} mastery={mastery} onClose={() => setDetailOpen(false)} onSelect={navigateTo} />}
       </div>
       <div className="sr-only" aria-live="polite">当前知识：{node.title}。掌握状态：{MASTERY_LABELS[mastery]}。</div>
     </div>

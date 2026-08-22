@@ -1724,6 +1724,9 @@ function GraphPreviewPanel({
       .then(() => {
         lastSavedRef.current = markdown
         onContentChange(markdown)
+        import("@/features/learning/learning-route-refresh").then(({ scheduleLearningRouteRefreshForWikiPath }) => {
+          scheduleLearningRouteRefreshForWikiPath(preview.path)
+        }).catch(() => {})
       })
       .catch((err) => console.error("Failed to save graph preview:", err))
   }, [onContentChange, preview.path])

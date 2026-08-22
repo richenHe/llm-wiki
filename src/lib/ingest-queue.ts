@@ -665,6 +665,15 @@ async function onQueueDrained(projectId: string, projectPath: string): Promise<v
       sweepAbortController = null
     }
   }
+
+  if (currentProjectId === projectId && !signal.aborted) {
+    try {
+      const { scheduleLearningRouteRefresh } = await import("@/features/learning/learning-route-refresh")
+      scheduleLearningRouteRefresh({ id: projectId, path: projectPath }, 0)
+    } catch (err) {
+      console.error("[Ingest Queue] Failed to schedule learning-route refresh:", err)
+    }
+  }
 }
 
 async function processNext(projectId: string): Promise<void> {

@@ -60,13 +60,20 @@ export async function resetProjectState(): Promise<void> {
 
   // Module-level caches — load in parallel and clear each, surfacing any
   // failure instead of swallowing it.
-  const [queueMod, dedupQueueMod, graphMod, fileSyncMod, scheduledImportMod] = await Promise.allSettled([
+  const [queueMod, dedupQueueMod, graphMod, fileSyncMod, scheduledImportMod, learningRoutesMod] = await Promise.allSettled([
     import("@/lib/ingest-queue"),
     import("@/lib/dedup-queue"),
     import("@/lib/graph-relevance"),
     import("@/lib/project-file-sync"),
     import("@/lib/scheduled-import"),
+    import("@/features/learning/learning-route-refresh"),
   ])
+
+  if (learningRoutesMod.status === "fulfilled") {
+    learningRoutesMod.value.cancelLearningRouteRefreshes()
+  } else {
+    console.warn("[Reset Project State] Failed to load learning-route refresh:", learningRoutesMod.reason)
+  }
 
   if (scheduledImportMod.status === "fulfilled") {
     try {

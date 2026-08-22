@@ -16,6 +16,7 @@ import { startClipWatcher } from "@/lib/clip-watcher"
 import { AppLayout } from "@/components/layout/app-layout"
 import { WelcomeScreen } from "@/components/project/welcome-screen"
 import { CreateProjectDialog } from "@/components/project/create-project-dialog"
+import { LEARNING_ROUTES_COMPLETED_EVENT, type LearningRoutesCompletedDetail } from "@/features/learning/learning-route-events"
 import type { WikiProject } from "@/types/wiki"
 
 function applyDocumentZoom(level: number) {
@@ -31,6 +32,7 @@ function App() {
   const zoomLevel = useZoomStore((s) => s.level)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [learningRouteNotice, setLearningRouteNotice] = useState<LearningRoutesCompletedDetail | null>(null)
 
   function isCurrentProject(proj: WikiProject): boolean {
     const current = useWikiStore.getState().project
@@ -124,6 +126,23 @@ function App() {
     setupAutoSave()
     startClipWatcher()
   }, [])
+
+  useEffect(() => {
+    const handleCompleted = (event: Event) => {
+      const detail = (event as CustomEvent<LearningRoutesCompletedDetail>).detail
+      const current = useWikiStore.getState().project
+      if (!detail || current?.path !== detail.projectPath) return
+      setLearningRouteNotice(detail)
+    }
+    window.addEventListener(LEARNING_ROUTES_COMPLETED_EVENT, handleCompleted)
+    return () => window.removeEventListener(LEARNING_ROUTES_COMPLETED_EVENT, handleCompleted)
+  }, [])
+
+  useEffect(() => {
+    if (!learningRouteNotice) return
+    const timer = window.setTimeout(() => setLearningRouteNotice(null), 12_000)
+    return () => window.clearTimeout(timer)
+  }, [learningRouteNotice])
 
   useEffect(() => {
     // Apply interface zoom globally, including welcome/settings screens. We
@@ -519,6 +538,12 @@ function App() {
     // to render. Each write has a stale-project guard so a fast project switch
     // cannot apply old review/lint/chat state to the new project.
     void hydrateProjectSideStores(proj)
+    // Rebuild the learning-route index after every project initialization.
+    // The scheduler waits for any active ingest queue, then processes every
+    // eligible knowledge point without blocking the rest of the application.
+    import("@/features/learning/learning-route-refresh").then(({ scheduleLearningRouteRefresh }) => {
+      if (isCurrentProject(proj)) scheduleLearningRouteRefresh({ id: proj.id, path: proj.path }, 0)
+    }).catch((err) => console.error("Failed to schedule learning-route refresh:", err))
   }
 
   async function handleSelectRecent(proj: WikiProject) {
@@ -606,6 +631,19 @@ function App() {
         onOpenChange={setShowCreateDialog}
         onCreated={handleProjectOpened}
       />
+      {learningRouteNotice && (
+        <div className="fixed bottom-6 right-6 z-[100] w-[340px] rounded-xl border border-violet-200 bg-white p-4 shadow-2xl" role="status" aria-live="polite">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">精华串联已完成</div>
+              <p className="mt-1 text-xs leading-5 text-slate-600">
+                已处理 {learningRouteNotice.processed}/{learningRouteNotice.total} 个知识点，生成 {learningRouteNotice.boardCount} 个可靠板块；{learningRouteNotice.unlinkedCount} 个知识点经审核后暂不串联。
+              </p>
+            </div>
+            <button type="button" onClick={() => setLearningRouteNotice(null)} className="rounded px-1.5 py-0.5 text-sm text-slate-400 hover:bg-slate-100 hover:text-slate-700" aria-label="关闭串联完成通知">×</button>
+          </div>
+        </div>
+      )}
     </>
   )
 }

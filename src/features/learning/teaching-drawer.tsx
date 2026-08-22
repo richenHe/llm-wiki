@@ -1,34 +1,28 @@
-import { convertFileSrc } from "@tauri-apps/api/core"
-import { AlertTriangle, CheckCircle2, Loader2, Play, RotateCcw, Sparkles, X } from "lucide-react"
+import { AlertTriangle, CheckCircle2, Loader2, Sparkles, X } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
-import { MermaidDiagram } from "@/components/mermaid-diagram"
 import { loadTeachingImageConfig } from "@/lib/project-store"
 import type { LearningMastery, LearningNode, LearningRelation } from "./learning-data"
-import { getLearningBreadcrumb } from "./learning-data"
+import type { LearningBoard } from "./learning-routes"
+import { learningBoardNodes } from "./learning-routes"
 import { useLearningStore } from "./learning-store"
-import { prepareTeachingLesson, evaluateTeachingAnswer } from "./teaching-agent"
+import { evaluateTeachingAnswer, prepareTeachingLesson } from "./teaching-agent"
 import { buildTeachingContext } from "./teaching-context"
 import { generateTeachingImage } from "./teaching-image"
-import type { TeachingQuestionKind, TeachingStage } from "./teaching-types"
-
-const STAGES: Array<{ id: TeachingStage; label: string; helper: string }> = [
-  { id: "locate", label: "定位", helper: "位置与本质" },
-  { id: "explain", label: "讲懂", helper: "解释与关联" },
-  { id: "apply", label: "用会", helper: "回答与判断" },
-  { id: "retain", label: "记牢", helper: "复习与巩固" },
-]
+import type { TeachingVisualBrief } from "./teaching-types"
 
 const VERDICT_LABEL = {
-  correct: "回答正确",
-  partial: "部分正确",
-  incorrect: "需要纠正",
+  correct: "已经讲清楚",
+  partial: "有一部分没讲清",
+  incorrect: "关键理解需要纠正",
   off_topic: "没有回答题目",
   unjudgeable: "依据不足，暂不能判断",
 } as const
 
-function displayImageSource(source: string): string {
-  return /^(?:https?:|data:|blob:)/i.test(source) ? source : convertFileSrc(source)
-}
+const BOARD_LABELS = {
+  category: { name: "同类并列", connector: "·" },
+  process: { name: "实际过程", connector: "→" },
+  prerequisite: { name: "理解前置", connector: "→" },
+} as const
 
 function friendlyTeachingError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
@@ -39,12 +33,47 @@ function friendlyTeachingError(error: unknown): string {
   return message
 }
 
-export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, onClose, onSelect }: {
+function TeachingVisual({ brief, projectPath }: { brief: TeachingVisualBrief; projectPath: string }) {
+  const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const [imageError, setImageError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setImageUrl(null)
+    setImageError(null)
+    if (brief.kind !== "image" || !brief.imagePrompt || !brief.cacheFingerprint) return
+    let cancelled = false
+    const controller = new AbortController()
+    loadTeachingImageConfig().then(async (config) => {
+      if (!config.enabled) {
+        if (!cancelled) setImageError("尚未在“设置 → 教学”中开启教学图片生成。")
+        return
+      }
+      try {
+        const url = await generateTeachingImage({ projectPath, fingerprint: brief.cacheFingerprint!, prompt: brief.imagePrompt!, config, signal: controller.signal })
+        if (!cancelled) setImageUrl(url)
+      } catch (error) {
+        if (!cancelled && !controller.signal.aborted) setImageError(error instanceof Error ? error.message : String(error))
+      }
+    }).catch((error) => { if (!cancelled) setImageError(error instanceof Error ? error.message : String(error)) })
+    return () => { cancelled = true; controller.abort() }
+  }, [brief, projectPath])
+
+  if (brief.kind === "none") return null
+  return <figure className="overflow-hidden rounded-xl border bg-slate-50/60 p-3">
+    {imageUrl && <img src={imageUrl} alt={`${brief.title}，AI 生成的辅助理解图`} className="max-h-80 w-full object-contain" />}
+    {!imageUrl && !imageError && <div className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />正在生成{brief.title}…</div>}
+    {!imageUrl && imageError && <p className="text-sm leading-6 text-amber-700">图片暂未生成：{imageError}</p>}
+    <figcaption className="mt-2 text-xs leading-5 text-muted-foreground">AI 辅助理解图，不作为知识依据 · {brief.reason}</figcaption>
+  </figure>
+}
+
+export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, learningBoard, onClose, onSelect }: {
   node: LearningNode
   nodes: readonly LearningNode[]
   relations: readonly LearningRelation[]
   projectPath: string
   mastery: LearningMastery
+  learningBoard?: LearningBoard | null
   onClose: () => void
   onSelect: (nodeId: string) => void
 }) {
@@ -52,33 +81,29 @@ export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, o
   const sessionsByNode = useLearningStore((state) => state.sessionsByNode)
   const draftAnswer = useLearningStore((state) => state.draftAnswer)
   const setDraftAnswer = useLearningStore((state) => state.setDraftAnswer)
-  const setActiveStage = useLearningStore((state) => state.setActiveStage)
   const setLesson = useLearningStore((state) => state.setLesson)
   const setTeachingError = useLearningStore((state) => state.setTeachingError)
   const markLearningStarted = useLearningStore((state) => state.markLearningStarted)
   const recordAttempt = useLearningStore((state) => state.recordAttempt)
   const session = sessionsByNode[node.id] ?? { activeStage: "locate" as const }
-  const lesson = session.lesson
-  const nodeAttempts = useMemo(() => attempts.filter((attempt) => attempt.nodeId === node.id), [attempts, node.id])
-  const latestAttempt = nodeAttempts[nodeAttempts.length - 1]
+  const lesson = session.lesson?.schemaVersion === 2 ? session.lesson : undefined
+  const boardNodes = useMemo(() => learningBoard ? learningBoardNodes(learningBoard, nodes) : [], [learningBoard, nodes])
+  const latestAttempt = useMemo(() => {
+    const matching = attempts.filter((attempt) => attempt.nodeId === node.id && attempt.question === lesson?.checkQuestion)
+    return matching[matching.length - 1]
+  }, [attempts, lesson?.checkQuestion, node.id])
   const [busy, setBusy] = useState<"lesson" | "judge" | null>(null)
-  const [imageUrl, setImageUrl] = useState<string | null>(null)
-  const [imageError, setImageError] = useState<string | null>(null)
   const controllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => () => controllerRef.current?.abort(), [])
-  useEffect(() => {
-    controllerRef.current?.abort()
-    setBusy(null)
-  }, [node.id])
+  useEffect(() => { controllerRef.current?.abort(); setBusy(null) }, [node.id])
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose() }
     window.addEventListener("keydown", handleEscape)
     return () => window.removeEventListener("keydown", handleEscape)
   }, [onClose])
-  useEffect(() => { setImageUrl(null); setImageError(null) }, [node.id, lesson?.sourceFingerprint])
 
-  const makeContext = () => buildTeachingContext({ projectPath, node, nodes, relations, attempts, mastery })
+  const makeContext = () => buildTeachingContext({ projectPath, node, nodes, relations, attempts, mastery, learningBoard })
 
   const prepare = async () => {
     controllerRef.current?.abort()
@@ -90,42 +115,12 @@ export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, o
       const prepared = await prepareTeachingLesson(await makeContext(), controller.signal)
       setLesson(node.id, prepared)
       markLearningStarted(node.id)
-      setActiveStage(node.id, "explain")
     } catch (error) {
       if (!controller.signal.aborted) setTeachingError(node.id, friendlyTeachingError(error))
     } finally {
       if (!controller.signal.aborted) setBusy(null)
     }
   }
-
-  useEffect(() => {
-    if (!lesson || lesson.visual.kind !== "image" || !lesson.visual.imagePrompt || imageUrl || imageError) return
-    let cancelled = false
-    loadTeachingImageConfig().then(async (config) => {
-      if (!config.enabled || cancelled) {
-        if (!cancelled) setImageError("尚未在“设置 → 教学”中开启教学图片生成。")
-        return
-      }
-      try {
-        const url = await generateTeachingImage({ projectPath, fingerprint: lesson.sourceFingerprint, prompt: lesson.visual.imagePrompt!, config })
-        if (!cancelled) setImageUrl(url)
-      } catch (error) {
-        if (!cancelled) setImageError(error instanceof Error ? error.message : String(error))
-      }
-    }).catch((error) => { if (!cancelled) setImageError(error instanceof Error ? error.message : String(error)) })
-    return () => { cancelled = true }
-  }, [imageError, imageUrl, lesson, projectPath])
-
-  const successfulRecall = nodeAttempts.some((attempt) => attempt.kind === "recall" && attempt.evaluation.verdict === "correct" && attempt.evaluation.passedRecall)
-  const successfulApplication = nodeAttempts.some((attempt) => (attempt.kind === "application" || attempt.kind === "transfer") && attempt.evaluation.verdict === "correct" && attempt.evaluation.passedApplication)
-  const questionKind: TeachingQuestionKind = session.activeStage === "retain"
-    ? "review"
-    : !successfulRecall
-      ? "recall"
-      : !successfulApplication
-        ? "application"
-        : "transfer"
-  const question = !lesson ? "" : questionKind === "recall" || questionKind === "review" ? lesson.recallQuestion : questionKind === "application" ? lesson.applicationQuestion : lesson.transferQuestion
 
   const submit = async () => {
     const answer = draftAnswer.trim()
@@ -136,9 +131,8 @@ export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, o
     setBusy("judge")
     setTeachingError(node.id, undefined)
     try {
-      const context = await makeContext()
-      const evaluation = await evaluateTeachingAnswer({ context, question, answer, kind: questionKind, signal: controller.signal })
-      recordAttempt({ id: crypto.randomUUID(), nodeId: node.id, question, answer, kind: questionKind, evaluation, createdAt: new Date().toISOString(), assisted: false })
+      const evaluation = await evaluateTeachingAnswer({ context: await makeContext(), question: lesson.checkQuestion, answer, kind: "application", signal: controller.signal })
+      recordAttempt({ id: crypto.randomUUID(), nodeId: node.id, question: lesson.checkQuestion, answer, kind: "application", evaluation, createdAt: new Date().toISOString(), assisted: false })
     } catch (error) {
       if (!controller.signal.aborted) setTeachingError(node.id, friendlyTeachingError(error))
     } finally {
@@ -146,31 +140,49 @@ export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, o
     }
   }
 
-  const changeStage = (stage: TeachingStage) => {
-    setActiveStage(node.id, stage)
-    if (!lesson && stage !== "locate") void prepare()
-  }
+  return <aside className="knowledge-detail-drawer teaching-drawer" aria-label={`${node.title}教学`}>
+    <div className="flex items-start justify-between border-b px-5 py-4">
+      <div className="min-w-0"><div className="text-xs text-muted-foreground">知识教学 · 讲懂后检验一次</div><h2 className="mt-1 truncate text-lg font-semibold">{node.glyph} · {node.title}</h2></div>
+      <button type="button" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground hover:bg-slate-100" aria-label="关闭教学"><X className="h-4 w-4" /></button>
+    </div>
+    <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+      {!lesson && <div className="space-y-5">
+        <div className="teaching-essence"><span aria-hidden="true">{node.glyph}</span><div><div className="text-xs font-medium text-blue-700">一句精华</div><p className="mt-1 text-[15px] leading-7">{node.essence}</p></div></div>
+        <p className="text-sm leading-6 text-muted-foreground">AI 会用当前资料和已经审核的精华串，讲清关系、概念、例子与反例，然后只检验一次。</p>
+        <button type="button" onClick={() => void prepare()} disabled={busy !== null} className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-medium text-white disabled:opacity-50">{busy === "lesson" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}{busy === "lesson" ? "AI 正在准备讲解…" : "开始 AI 教学"}</button>
+      </div>}
 
-  return (
-    <aside className="knowledge-detail-drawer teaching-drawer" aria-label={`${node.title}教学`}>
-      <div className="flex items-start justify-between border-b px-5 py-4">
-        <div className="min-w-0"><div className="text-xs text-muted-foreground">知识教学 · {mastery === "unseen" ? "未学习" : mastery === "learning" ? "理解中" : mastery === "applicable" ? "会应用" : mastery === "mastered" ? "本次掌握" : "已巩固"}</div><h2 className="mt-1 truncate text-lg font-semibold">{node.glyph} · {node.title}</h2></div>
-        <button type="button" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" aria-label="关闭教学"><X className="h-4 w-4" /></button>
-      </div>
-      <nav className="grid grid-cols-4 border-b" aria-label="教学阶段">
-        {STAGES.map((stage) => <button key={stage.id} type="button" aria-current={session.activeStage === stage.id ? "step" : undefined} onClick={() => changeStage(stage.id)} className={`min-w-0 border-r px-2 py-3 text-left last:border-r-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${session.activeStage === stage.id ? "bg-blue-600 text-white" : "bg-background hover:bg-slate-50"}`}><strong className="block text-sm">{stage.label}</strong><span className={`mt-0.5 block truncate text-[10px] ${session.activeStage === stage.id ? "text-blue-100" : "text-muted-foreground"}`}>{stage.helper}</span></button>)}
-      </nav>
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
-        {session.activeStage === "locate" && <div className="space-y-5"><div className="teaching-essence"><span aria-hidden="true">{node.glyph}</span><div><div className="text-xs font-medium text-blue-700">一句精华</div><p className="mt-1 text-[15px] leading-7">{lesson?.essence ?? node.essence}</p></div></div><div><div className="text-xs font-medium text-muted-foreground">知识位置</div><p className="mt-1 text-sm leading-6">{getLearningBreadcrumb(node.id, nodes).map((item) => item.title).join(" → ")}</p></div><div><div className="text-xs font-medium text-muted-foreground">来源</div><p className="mt-1 text-sm font-medium">{node.source}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">{node.sourceDetail}</p></div><div><div className="text-xs font-medium text-muted-foreground">学完能做什么</div><p className="mt-1 text-sm leading-6">{node.capabilities.length ? node.capabilities.join("、") : `能解释并应用“${node.title}”。`}</p></div><button type="button" onClick={() => void prepare()} disabled={busy !== null} className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">{busy === "lesson" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}{busy === "lesson" ? "AI 正在准备讲解…" : lesson ? "重新准备讲解" : "开始 AI 教学"}</button></div>}
+      {lesson && <div className="space-y-7">
+        <section>
+          <div className="text-xs font-medium text-violet-700">知识关联与关系说明</div>
+          {learningBoard ? <div className="mt-2 rounded-xl border border-violet-100 bg-violet-50/50 p-3">
+            <div className="flex items-center justify-between gap-3"><strong className="text-sm">{learningBoard.title}</strong><span className="shrink-0 text-[10px] text-violet-700">{BOARD_LABELS[learningBoard.kind].name}</span></div>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{learningBoard.centralQuestion}</p>
+            <div className="mt-3 flex flex-wrap items-center gap-1.5">{boardNodes.map((item, index) => <span key={item.id} className="flex items-center gap-1.5"><button type="button" onClick={() => onSelect(item.id)} className={`rounded-full border px-2.5 py-1 text-xs ${item.id === node.id ? "border-blue-600 bg-blue-600 text-white" : "bg-white text-slate-700"}`}>{item.title}</button>{index < boardNodes.length - 1 && <span className="text-slate-400">{BOARD_LABELS[learningBoard.kind].connector}</span>}</span>)}</div>
+            <p className="mt-3 border-l-2 border-violet-300 pl-3 text-xs leading-5 text-slate-600">{learningBoard.mnemonic}</p>
+          </div> : <p className="mt-2 rounded-lg border px-3 py-2 text-sm leading-6 text-muted-foreground">当前没有经过审核的可靠知识串，因此不会为了凑内容强行关联。</p>}
+          <p className="mt-3 text-sm leading-7 text-foreground/80">{lesson.relationshipExplanation}</p>
+          <div className="mt-3"><TeachingVisual brief={lesson.relationshipVisual} projectPath={projectPath} /></div>
+        </section>
 
-        {session.activeStage === "explain" && <div className="space-y-5">{lesson ? <><section><h3 className="text-sm font-semibold">先讲懂</h3><p className="mt-2 text-sm leading-7 text-foreground/80">{lesson.explanation}</p></section><section><h3 className="text-sm font-semibold">换个具体例子</h3><p className="mt-2 text-sm leading-7 text-foreground/80">{lesson.analogy}</p></section>{lesson.visual.kind !== "none" && <figure className="overflow-hidden rounded-xl border bg-slate-50/60 p-3">{lesson.visual.kind === "source" && lesson.visual.sourceImage && <img src={displayImageSource(lesson.visual.sourceImage)} alt={`${lesson.visual.title}，来自当前资料`} className="max-h-80 w-full object-contain" />}{lesson.visual.kind === "mermaid" && lesson.visual.mermaid && <MermaidDiagram code={lesson.visual.mermaid} />}{lesson.visual.kind === "image" && imageUrl && <img src={imageUrl} alt={`${lesson.visual.title}，AI 生成的辅助理解图`} className="max-h-80 w-full object-contain" />}{lesson.visual.kind === "image" && !imageUrl && !imageError && <div className="flex min-h-36 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />正在生成辅助理解图…</div>}{lesson.visual.kind === "image" && imageError && <p className="text-sm leading-6 text-amber-700">图片暂未生成：{imageError}</p>}<figcaption className="mt-2 text-xs leading-5 text-muted-foreground">{lesson.visual.kind === "source" ? "来源证据" : "辅助理解，不作为知识依据"} · {lesson.visual.reason}</figcaption></figure>}<section><h3 className="text-sm font-semibold">和哪些知识有关</h3><div className="mt-2 space-y-2">{lesson.connections.map((connection, index) => <button key={`${connection.title}-${index}`} type="button" disabled={!connection.nodeId} onClick={() => connection.nodeId && onSelect(connection.nodeId)} className="block w-full rounded-lg border px-3 py-2 text-left disabled:cursor-default"><strong className="text-sm">{connection.title}</strong><span className="mt-1 block text-xs leading-5 text-muted-foreground">{connection.explanation}</span></button>)}</div></section><div className="rounded-lg bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-900"><strong>容易误解：</strong>{lesson.commonMistake}</div><button type="button" onClick={() => setActiveStage(node.id, "apply")} className="h-10 w-full rounded-lg bg-blue-600 text-sm font-medium text-white hover:bg-blue-700">我来试着回答</button></> : <button type="button" onClick={() => void prepare()} disabled={busy !== null} className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-medium text-white disabled:opacity-50"><Play className="h-4 w-4" />生成讲解</button>}</div>}
+        <section><div className="teaching-essence"><span aria-hidden="true">{node.glyph}</span><div><div className="text-xs font-medium text-blue-700">概念讲解</div><p className="mt-1 text-[15px] leading-7">{lesson.essence}</p></div></div><p className="mt-3 text-sm leading-7 text-foreground/80">{lesson.explanation}</p></section>
+        <section><h3 className="text-sm font-semibold">为什么会这样</h3><p className="mt-2 text-sm leading-7 text-foreground/80">{lesson.mechanism}</p></section>
+        <section className="grid gap-3 sm:grid-cols-2"><div className="rounded-xl border border-emerald-100 bg-emerald-50/50 p-3"><h3 className="text-sm font-semibold text-emerald-800">例子</h3><p className="mt-2 text-sm leading-7 text-foreground/80">{lesson.example}</p></div><div className="rounded-xl border border-amber-100 bg-amber-50/50 p-3"><h3 className="text-sm font-semibold text-amber-800">反例</h3><p className="mt-2 text-sm leading-7 text-foreground/80">{lesson.counterexample}</p></div></section>
+        <section><h3 className="mb-3 text-sm font-semibold">概念理解图</h3>{lesson.conceptVisual.kind === "none" ? <p className="rounded-lg border px-3 py-2 text-sm leading-6 text-muted-foreground">这个知识点不适合强行画图：{lesson.conceptVisual.reason}</p> : <TeachingVisual brief={lesson.conceptVisual} projectPath={projectPath} />}</section>
 
-        {session.activeStage === "apply" && <div className="space-y-4">{lesson ? <><div><div className="text-xs font-medium text-blue-700">{questionKind === "recall" ? "主动回忆" : questionKind === "application" ? "实际应用" : "迁移练习"}</div><h3 className="mt-2 text-base font-semibold leading-7">{question}</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">请独立回答。AI 会说明答对了什么、缺了什么，并给出下一步。</p></div><textarea value={draftAnswer} onChange={(event) => setDraftAnswer(event.target.value)} className="min-h-40 w-full resize-y rounded-lg border p-3 text-sm leading-6 outline-none focus-visible:ring-2 focus-visible:ring-blue-500" placeholder="用自己的话作答；不知道也可以写出卡住的位置。" /><button type="button" onClick={() => void submit()} disabled={busy !== null || !draftAnswer.trim()} className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">{busy === "judge" && <Loader2 className="h-4 w-4 animate-spin" />}{busy === "judge" ? "AI 正在核对答案…" : "提交给 AI 判断"}</button>{latestAttempt && <div className={`rounded-xl border p-4 ${latestAttempt.evaluation.verdict === "correct" ? "border-emerald-200 bg-emerald-50/70" : "border-amber-200 bg-amber-50/70"}`}><div className="flex items-center gap-2">{latestAttempt.evaluation.verdict === "correct" ? <CheckCircle2 className="h-4 w-4 text-emerald-700" /> : <AlertTriangle className="h-4 w-4 text-amber-700" />}<strong className="text-sm">{VERDICT_LABEL[latestAttempt.evaluation.verdict]}</strong></div><p className="mt-2 text-sm leading-6">{latestAttempt.evaluation.feedback}</p>{latestAttempt.evaluation.missingPoints.length > 0 && <div className="mt-3"><div className="text-xs font-medium">还缺这些关键点</div><ul className="mt-1 list-disc space-y-1 pl-5 text-xs leading-5">{latestAttempt.evaluation.missingPoints.map((point) => <li key={point}>{point}</li>)}</ul></div>}<p className="mt-3 text-xs leading-5"><strong>下一步：</strong>{latestAttempt.evaluation.nextAction}</p></div>}</> : <p className="text-sm text-muted-foreground">请先让 AI 准备讲解，再进入练习。</p>}</div>}
+        <section className="rounded-xl border p-4">
+          <div className="text-xs font-medium text-blue-700">一次轻量 AI 检验</div>
+          <h3 className="mt-2 text-base font-semibold leading-7">{lesson.checkQuestion}</h3>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">用自己的话回答即可。AI 只检查这次是否讲懂，不安排之后复习。</p>
+          <textarea value={draftAnswer} onChange={(event) => setDraftAnswer(event.target.value)} className="mt-3 min-h-32 w-full resize-y rounded-lg border p-3 text-sm leading-6 outline-none focus-visible:ring-2 focus-visible:ring-blue-500" placeholder="写下你的理解；不知道也可以直接写卡住的地方。" />
+          <button type="button" onClick={() => void submit()} disabled={busy !== null || !draftAnswer.trim()} className="mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-medium text-white disabled:opacity-50">{busy === "judge" && <Loader2 className="h-4 w-4 animate-spin" />}{busy === "judge" ? "AI 正在核对…" : "提交给 AI 检验"}</button>
+          {latestAttempt && <div className={`mt-4 rounded-xl border p-4 ${latestAttempt.evaluation.verdict === "correct" ? "border-emerald-200 bg-emerald-50/70" : "border-amber-200 bg-amber-50/70"}`}><div className="flex items-center gap-2">{latestAttempt.evaluation.verdict === "correct" ? <CheckCircle2 className="h-4 w-4 text-emerald-700" /> : <AlertTriangle className="h-4 w-4 text-amber-700" />}<strong className="text-sm">{VERDICT_LABEL[latestAttempt.evaluation.verdict]}</strong></div><p className="mt-2 text-sm leading-6">{latestAttempt.evaluation.feedback}</p>{latestAttempt.evaluation.missingPoints.length > 0 && <ul className="mt-2 list-disc pl-5 text-xs leading-5">{latestAttempt.evaluation.missingPoints.map((point) => <li key={point}>{point}</li>)}</ul>}<p className="mt-3 text-xs leading-5"><strong>现在补清楚：</strong>{latestAttempt.evaluation.nextAction}</p></div>}
+        </section>
 
-        {session.activeStage === "retain" && <div className="space-y-5"><div className="teaching-essence"><span aria-hidden="true">{node.glyph}</span><div><div className="text-xs font-medium text-blue-700">用这个字提取整段知识</div><p className="mt-1 text-[15px] leading-7">先遮住解释，只看“{node.glyph}”，尝试说出“{node.title}”的本质、一个关联和一个应用。</p></div></div><div><h3 className="text-sm font-semibold">本次证据</h3><p className="mt-2 text-sm leading-6 text-muted-foreground">已完成 {nodeAttempts.length} 次回答；回忆{successfulRecall ? "已通过" : "未通过"}，应用{successfulApplication ? "已通过" : "未通过"}。</p></div>{session.reviewDueAt && <div className="rounded-lg border p-3 text-sm leading-6"><strong>建议复习时间：</strong>{new Date(session.reviewDueAt).toLocaleString()}。到时间后不看资料再答一次，正确才会变成“已巩固”。</div>}<button type="button" onClick={() => setActiveStage(node.id, "apply")} className="flex h-10 w-full items-center justify-center gap-2 rounded-lg border text-sm font-medium hover:bg-slate-50"><RotateCcw className="h-4 w-4" />现在复习一次</button></div>}
+        <button type="button" onClick={() => void prepare()} disabled={busy !== null} className="flex h-10 w-full items-center justify-center gap-2 rounded-lg border text-sm font-medium disabled:opacity-50">{busy === "lesson" && <Loader2 className="h-4 w-4 animate-spin" />}{busy === "lesson" ? "AI 正在重新准备…" : "重新生成这次讲解"}</button>
+      </div>}
 
-        {session.lastError && <div role="alert" className="mt-5 rounded-lg border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-800"><strong>这一步没有完成：</strong>{session.lastError}<button type="button" onClick={() => session.activeStage === "apply" ? void submit() : void prepare()} className="mt-2 block text-sm font-medium underline">保留当前内容并重试</button></div>}
-      </div>
-    </aside>
-  )
+      {session.lastError && <div role="alert" className="mt-5 rounded-lg border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-800"><strong>这一步没有完成：</strong>{session.lastError}<button type="button" onClick={() => lesson && draftAnswer.trim() ? void submit() : void prepare()} className="mt-2 block font-medium underline">保留当前内容并重试</button></div>}
+    </div>
+  </aside>
 }

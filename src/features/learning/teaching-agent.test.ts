@@ -25,23 +25,49 @@ const context: TeachingContext = {
   sourceExcerpt: "缓存会暂时保存已经得到的结果。",
   sourceFingerprint: "abc",
   sourceImage: "C:/project/wiki/media/cache.png",
+  learningBoard: {
+    id: "storage",
+    title: "结果保存方式",
+    centralQuestion: "系统怎样保留已经得到的结果？",
+    kind: "category",
+    nodeIds: ["cache", "storage"],
+    orderedNodeIds: [],
+    reason: "两者都是保存结果的方式。",
+    evidence: [],
+    confidence: 0.95,
+    mnemonic: "缓存重在临时复用，存储重在长期保留。",
+    mnemonicParts: [],
+  },
+  learningBoardFingerprint: "board-abc",
+  learningBoardNodes: [
+    { id: "cache", title: "缓存", glyph: "缓", essence: "暂时保存结果以便复用。", parentId: null, prerequisiteIds: [], source: "测试", sourceDetail: "cache.md", capabilities: [], mastery: "unseen", position: { x: 0, y: 0 } },
+    { id: "storage", title: "存储", glyph: "存", essence: "长期保存数据。", parentId: null, prerequisiteIds: [], source: "测试", sourceDetail: "storage.md", capabilities: [], mastery: "unseen", position: { x: 0, y: 0 } },
+  ],
   priorAttempts: [], currentMastery: "unseen",
 }
 
 describe("teaching agent", () => {
   beforeEach(() => { mocks.output = ""; mocks.tasks.length = 0 })
 
-  it("prepares a complete lesson and keeps a source image ahead of generated visuals", async () => {
+  it("prepares one simple lesson with concept and relationship image rules", async () => {
     mocks.output = JSON.stringify({
-      essence: "缓存就是把旧结果先放在手边。", explanation: "系统先找已经算好的结果。", analogy: "像把常用书放在桌面。", commonMistake: "缓存不是永久真相。",
-      connections: [{ title: "存储", relation: "related", explanation: "都会保存数据。" }],
-      recallQuestion: "缓存是什么？", applicationQuestion: "网页头像没更新怎么办？", transferQuestion: "给出另一个缓存场景。",
-      visual: { kind: "image", title: "缓存类比", reason: "帮助理解", imagePrompt: "桌面上的常用书" },
+      essence: "缓存就是把旧结果先放在手边。",
+      relationshipExplanation: "缓存和存储是回答同一问题的两种并列方式，没有先后顺序。",
+      explanation: "系统先找已经算好的结果。",
+      mechanism: "命中旧结果时就不用重复计算。",
+      example: "网页复用已经下载的头像。",
+      counterexample: "数据库长期保存原始订单，不是缓存。",
+      checkQuestion: "缓存与存储是什么关系，缓存为什么能加快访问？",
+      conceptVisual: { kind: "image", form: "真实场景图", focus: "旧结果被再次取用", reason: "帮助看出复用" },
+      relationshipVisual: { focus: "缓存与存储并列", reason: "看清二者区别" },
     })
     const lesson = await prepareTeachingLesson(context)
     expect(mocks.tasks).toEqual(["learn"])
-    expect(lesson.visual.kind).toBe("source")
-    expect(lesson.recallQuestion).toContain("缓存")
+    expect(lesson.schemaVersion).toBe(2)
+    expect(lesson.conceptVisual.imagePrompt).toContain("生物结构用形象、准确的结构示意")
+    expect(lesson.relationshipVisual.imagePrompt).toContain("同类并列关系")
+    expect(lesson.relationshipVisual.imagePrompt).toContain("不画先后箭头")
+    expect(lesson.checkQuestion).toContain("缓存")
   })
 
   it("uses the independent judge route and preserves missing points", async () => {

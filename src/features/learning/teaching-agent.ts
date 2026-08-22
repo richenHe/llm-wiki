@@ -1,19 +1,25 @@
 import { streamChat, type ChatMessage } from "@/lib/llm-client"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
-import type { TeachingContext, TeachingEvaluation, TeachingLesson, TeachingQuestionKind } from "./teaching-types"
+import type { TeachingContext, TeachingEvaluation, TeachingLesson, TeachingQuestionKind, TeachingVisualBrief } from "./teaching-types"
 
 function compactNode(node: TeachingContext["node"]): string {
   return `${node.title}：${node.essence}`
 }
 
 function contextText(context: TeachingContext): string {
+  const board = context.learningBoard
+  const boardText = board ? [
+    `已审核串联板块：${board.title}（${board.kind === "category" ? "同类知识" : board.kind === "process" ? "同一流程" : "学习前置顺序"}）`,
+    `板块核心问题：${board.centralQuestion}`,
+    `板块知识：${context.learningBoardNodes.map(compactNode).join(board.kind === "category" ? " · " : " → ")}`,
+    `归类理由：${board.reason}`,
+    `节点依据：${board.evidence.map((item) => `${context.learningBoardNodes.find((node) => node.id === item.nodeId)?.title ?? item.nodeId}：${item.detail}`).join("；")}`,
+    `顺口溜：${board.mnemonic}`,
+    `精华句对应：${board.mnemonicParts.map((item) => `${item.nodeId}：${item.phrase}`).join("；")}`,
+  ].join("\n") : "当前知识尚未进入证据充分的串联板块；不要为了建立关系而强行关联。"
   return [
     `当前知识：${compactNode(context.node)}`,
-    `位置：${context.breadcrumb.map((node) => node.title).join(" → ")}`,
-    `前置知识：${context.prerequisites.map(compactNode).join("；") || "无"}`,
-    `下一层知识：${context.children.map(compactNode).join("；") || "无"}`,
-    `同级知识：${context.siblings.map(compactNode).join("；") || "无"}`,
-    `其他关联：${context.related.map(compactNode).join("；") || "无"}`,
+    boardText,
     `来源内容：\n${context.sourceExcerpt}`,
   ].join("\n\n")
 }
@@ -36,6 +42,33 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()).slice(0, 8) : []
 }
 
+function parseVisual(value: unknown, field: string, cacheFingerprint: string, context: TeachingContext, relationship = false): TeachingVisualBrief {
+  const visual = value && typeof value === "object" ? value as Record<string, unknown> : {}
+  const focus = typeof visual.focus === "string" ? visual.focus.trim() : ""
+  const form = typeof visual.form === "string" ? visual.form.trim() : "清晰教学示意图"
+  const kind = relationship
+    ? context.learningBoard ? "image" : "none"
+    : visual.kind === "image" ? "image" : "none"
+  const relationshipRule = context.learningBoard?.kind === "category"
+    ? "这是同类并列关系，使用并列分区或共同上位概念，不画先后箭头。"
+    : context.learningBoard?.kind === "process"
+      ? "这是实际流程关系，按已审核顺序画单向步骤箭头。"
+      : context.learningBoard?.kind === "prerequisite"
+        ? "这是学习前置关系，箭头只表示先学什么、后学什么，不冒充实际流程。"
+        : "当前没有已审核串联，不要添加知识关系或箭头。"
+  const generatedPrompt = relationship
+    ? `为普通学习者制作一张“知识关系图”。${relationshipRule}板块：${context.learningBoard?.title ?? "无可靠串联"}。中心问题：${context.learningBoard?.centralQuestion ?? "无"}。节点：${context.learningBoardNodes.map((node) => `${node.title}${node.id === context.node.id ? "（当前知识，需突出）" : ""}`).join("、") || context.node.title}。画面重点：${focus || "准确显示已审核关系"}。固定要求：只使用列出的节点，不新增、不合并、不改名；并列不能画成顺序，过程不能画成分类，理解前置不能冒充真实因果；主要依靠位置、连线、箭头或分支表达，中文只保留节点名和必要关系短语，不放大段说明；不要品牌、装饰背景或水印。`
+    : `为普通学习者制作一张“概念理解图”。主题：${context.node.title}。概念本质：${context.node.essence}。采用视觉形式：${form}。画面重点：${focus || context.node.essence}。固定要求：根据知识本身选择画法；生物结构用形象、准确的结构示意，物理或化学过程用变化与作用关系，电路用规范线路和路径，数学用几何、坐标或数量关系，抽象概念用贴近事实的场景或对比；图片必须帮助看懂概念，不能只是装饰或大段文字海报；只能表现来源支持的内容，不补造结构、步骤、因果或数据；中文只保留必要短标签，不要品牌、标题栏或水印。来源依据：${context.sourceExcerpt.slice(0, 4_000)}`
+  const imagePrompt = kind === "image" ? generatedPrompt : undefined
+  return {
+    kind,
+    title: typeof visual.title === "string" && visual.title.trim() ? visual.title.trim() : field,
+    reason: typeof visual.reason === "string" && visual.reason.trim() ? visual.reason.trim() : `帮助理解${field}。`,
+    imagePrompt,
+    cacheFingerprint,
+  }
+}
+
 function callTeachingModel(task: "learn" | "judge", messages: ChatMessage[], signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
     let result = ""
@@ -52,56 +85,32 @@ function callTeachingModel(task: "learn" | "judge", messages: ChatMessage[], sig
         settled = true
         reject(error)
       },
-    }, signal, { temperature: 0.2, max_tokens: 2600 })
+    }, signal, { temperature: 0.2, max_tokens: 2800 })
   })
 }
 
 function parseLesson(raw: string, context: TeachingContext): TeachingLesson {
   const value = extractJson(raw) as Record<string, unknown>
-  const rawConnections = Array.isArray(value.connections) ? value.connections : []
-  const visual = (value.visual && typeof value.visual === "object" ? value.visual : {}) as Record<string, unknown>
-  const visualKind = visual.kind === "mermaid" || visual.kind === "image" ? visual.kind : "none"
   return {
+    schemaVersion: 2,
     nodeId: context.node.id,
     sourceFingerprint: context.sourceFingerprint,
     essence: stringValue(value.essence, "一句精华"),
     explanation: stringValue(value.explanation, "通俗解释"),
-    analogy: stringValue(value.analogy, "具体例子或类比"),
-    commonMistake: stringValue(value.commonMistake, "常见误区"),
-    connections: rawConnections.slice(0, 8).map((item) => {
-      const connection = item as Record<string, unknown>
-      const relation = ["prerequisite", "child", "sibling", "related", "example"].includes(String(connection.relation))
-        ? connection.relation as "prerequisite" | "child" | "sibling" | "related" | "example"
-        : "related"
-      return {
-        nodeId: typeof connection.nodeId === "string" ? connection.nodeId : undefined,
-        title: stringValue(connection.title, "关联名称"),
-        relation,
-        explanation: stringValue(connection.explanation, "关联说明"),
-      }
-    }),
-    recallQuestion: stringValue(value.recallQuestion, "回忆题"),
-    applicationQuestion: stringValue(value.applicationQuestion, "应用题"),
-    transferQuestion: stringValue(value.transferQuestion, "迁移题"),
-    visual: context.sourceImage ? {
-      kind: "source",
-      title: "资料原图",
-      reason: "这张图来自当前知识来源，可直接对照原文理解。",
-      sourceImage: context.sourceImage,
-    } : {
-      kind: visualKind,
-      title: typeof visual.title === "string" ? visual.title.trim() : "辅助理解图",
-      reason: typeof visual.reason === "string" ? visual.reason.trim() : "帮助看清知识结构。",
-      mermaid: visualKind === "mermaid" && typeof visual.mermaid === "string" ? visual.mermaid.trim().replace(/^```mermaid\s*|```$/gi, "") : undefined,
-      imagePrompt: visualKind === "image" && typeof visual.imagePrompt === "string" ? visual.imagePrompt.trim() : undefined,
-    },
+    mechanism: stringValue(value.mechanism, "核心机制"),
+    example: stringValue(value.example, "正例"),
+    counterexample: stringValue(value.counterexample, "反例或边界"),
+    relationshipExplanation: stringValue(value.relationshipExplanation, "串联关系说明"),
+    checkQuestion: stringValue(value.checkQuestion, "检查题"),
+    conceptVisual: parseVisual(value.conceptVisual, "概念理解图", `${context.sourceFingerprint}-concept-v2`, context),
+    relationshipVisual: parseVisual(value.relationshipVisual, "知识关系图", `${context.learningBoardFingerprint ?? context.sourceFingerprint}-relationship-v2`, context, true),
     preparedAt: new Date().toISOString(),
   }
 }
 
 export async function prepareTeachingLesson(context: TeachingContext, signal?: AbortSignal): Promise<TeachingLesson> {
   const messages: ChatMessage[] = [
-    { role: "system", content: `你是个人知识库中的教学设计师。只能依据用户提供的来源内容和知识关系教学；来源不足时要明确说不足，不能补造事实。面向普通学习者，用日常语言和具体例子。内部检查八件事：定位、建图、理解、连接、练习、检验、迁移、复习。返回且只返回 JSON：{"essence":"一个字标签所串联的一句话本质","explanation":"通俗但准确的解释","analogy":"具体例子或类比","commonMistake":"一个核心误区","connections":[{"nodeId":"可选","title":"名称","relation":"prerequisite|child|sibling|related|example","explanation":"为什么有关"}],"recallQuestion":"不看资料的回忆题","applicationQuestion":"能验证会用的应用题","transferQuestion":"换场景的迁移题","visual":{"kind":"mermaid|image|none","title":"图名","reason":"为什么需要图","mermaid":"只在mermaid时提供合法代码","imagePrompt":"只在image时提供客观教学图提示词"}}。关系或流程优先 Mermaid；只有场景、空间或形象类比确实有帮助时才选择 image。` },
+    { role: "system", content: `你是个人知识库中的讲解老师，目标只有让普通学习者看懂当前概念。只能依据来源和已审核精华串；资料不足要直说，不能补造。不要重复知识目录位置，也不要罗列系统已有的前置基础。先说明精华串是什么关系，再讲概念本质和为什么成立，然后给一个具体正例和一个反例，最后只出一道轻量检验题；不要安排回忆、迁移、复习或延迟任务。category 是并列，绝不能写成先后；process 才是实际顺序；prerequisite 只是理解依赖。概念适合生图时选择最符合知识本身的形式，例如生物结构用形象结构示意，不要统一写成机械流程图；不适合则选 none。关系图由程序按精华串固定生成，你只提供画面重点。返回且只返回 JSON：{"essence":"一句最短本质","relationshipExplanation":"精华串关系和当前知识的作用","explanation":"通俗讲解","mechanism":"为什么会这样","example":"具体正例及对应关系","counterexample":"反例及不成立原因","checkQuestion":"一道轻量检验题","conceptVisual":{"kind":"image|none","title":"概念理解图","form":"形象结构图|过程变化图|空间关系图|对比图|数量关系图|真实场景图","focus":"画面必须看出的关键点","reason":"为什么适合或不适合用图"},"relationshipVisual":{"focus":"关系图应突出什么","reason":"为什么有帮助"}}。` },
     { role: "user", content: contextText(context) },
   ]
   const raw = await callTeachingModel("learn", messages, signal)
@@ -131,8 +140,8 @@ function parseEvaluation(raw: string): TeachingEvaluation {
     missingPoints: stringList(value.missingPoints),
     evidence: stringList(value.evidence),
     nextAction: stringValue(value.nextAction, "下一步"),
-    passedRecall: value.passedRecall === true,
-    passedApplication: value.passedApplication === true,
+    passedRecall: false,
+    passedApplication: verdict === "correct" && value.unresolvedCoreMisconception === false,
     unresolvedCoreMisconception: value.unresolvedCoreMisconception !== false,
   }
 }
@@ -145,8 +154,8 @@ export async function evaluateTeachingAnswer(input: {
   signal?: AbortSignal
 }): Promise<TeachingEvaluation> {
   const messages: ChatMessage[] = [
-    { role: "system", content: `你是独立的学习效果判断员，不负责鼓励式放水。只能依据来源和题目判断。区分 correct、partial、incorrect、off_topic、unjudgeable。引用依据只能短句转述，不得编造原文。返回且只返回 JSON：{"verdict":"correct|partial|incorrect|off_topic|unjudgeable","feedback":"直白说明为什么","strengths":["答对之处"],"missingPoints":["缺失或错误"],"evidence":["来源依据"],"nextAction":"下一步具体动作","passedRecall":false,"passedApplication":false,"unresolvedCoreMisconception":true}。回忆题正确只能通过回忆；应用或迁移题正确才能通过应用。若来源不足以判断，必须用 unjudgeable。` },
-    { role: "user", content: `${contextText(input.context)}\n\n题目类型：${input.kind}\n题目：${input.question}\n学习者回答：${input.answer}` },
+    { role: "system", content: `你是一次性理解检验的判断员。只能依据来源、精华串和题目判断，不安排记忆或延迟复习。区分 correct、partial、incorrect、off_topic、unjudgeable；来源不足必须用 unjudgeable。返回且只返回 JSON：{"verdict":"correct|partial|incorrect|off_topic|unjudgeable","feedback":"直白说明为什么","strengths":["答对之处"],"missingPoints":["缺失或错误"],"evidence":["来源依据"],"nextAction":"只说明当前答案怎样补清楚，不安排以后复习","unresolvedCoreMisconception":true}。` },
+    { role: "user", content: `${contextText(input.context)}\n\n题目：${input.question}\n学习者回答：${input.answer}` },
   ]
   const raw = await callTeachingModel("judge", messages, input.signal)
   try {

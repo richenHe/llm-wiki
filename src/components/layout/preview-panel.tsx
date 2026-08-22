@@ -61,6 +61,9 @@ export function PreviewPanel() {
       .then(() => {
         lastLoadedRef.current = markdown
         if (syncStore) setFileContent(markdown)
+        import("@/features/learning/learning-route-refresh").then(({ scheduleLearningRouteRefreshForWikiPath }) => {
+          scheduleLearningRouteRefreshForWikiPath(path)
+        }).catch(() => {})
       })
       .catch((err) => console.error("Failed to save:", err))
   }, [setFileContent])

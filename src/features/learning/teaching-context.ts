@@ -2,6 +2,7 @@ import { readFile } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
 import type { LearningNode, LearningRelation } from "./learning-data"
 import { getLearningBreadcrumb, getLearningChildren, getLearningSiblings } from "./learning-data"
+import type { LearningBoard } from "./learning-routes"
 import type { TeachingAttempt, TeachingContext } from "./teaching-types"
 
 const MAX_SOURCE_CHARS = 12_000
@@ -54,6 +55,7 @@ export async function buildTeachingContext(input: {
   relations: readonly LearningRelation[]
   attempts: TeachingAttempt[]
   mastery: TeachingContext["currentMastery"]
+  learningBoard?: LearningBoard | null
 }): Promise<TeachingContext> {
   const sourcePath = resolveSourcePath(input.projectPath, input.node.sourcePath)
   let sourceExcerpt = input.node.essence
@@ -74,6 +76,21 @@ export async function buildTeachingContext(input: {
     .filter((node): node is LearningNode => Boolean(node))
     .slice(0, 8)
   const sourceFingerprint = await fingerprint(`${input.node.id}\n${sourceExcerpt}`)
+  const learningBoard = input.learningBoard ?? undefined
+  const learningBoardFingerprint = learningBoard
+    ? await fingerprint(JSON.stringify({
+      id: learningBoard.id,
+      kind: learningBoard.kind,
+      title: learningBoard.title,
+      centralQuestion: learningBoard.centralQuestion,
+      nodeIds: learningBoard.nodeIds,
+      orderedNodeIds: learningBoard.orderedNodeIds,
+      reason: learningBoard.reason,
+      evidence: learningBoard.evidence,
+      mnemonic: learningBoard.mnemonic,
+      mnemonicParts: learningBoard.mnemonicParts,
+    }))
+    : undefined
   return {
     node: input.node,
     breadcrumb: getLearningBreadcrumb(input.node.id, input.nodes),
@@ -85,6 +102,13 @@ export async function buildTeachingContext(input: {
     sourcePath,
     sourceImage: findSourceImage(sourceExcerpt, sourcePath),
     sourceFingerprint,
+    learningBoard,
+    learningBoardFingerprint,
+    learningBoardNodes: learningBoard
+      ? (learningBoard.orderedNodeIds.length >= 2 ? learningBoard.orderedNodeIds : learningBoard.nodeIds)
+        .map((id) => input.nodes.find((node) => node.id === id))
+        .filter((node): node is LearningNode => Boolean(node))
+      : [],
     priorAttempts: input.attempts.filter((attempt) => attempt.nodeId === input.node.id).slice(-8),
     currentMastery: input.mastery,
   }

@@ -1,4 +1,5 @@
 import type { LearningMastery, LearningNode } from "./learning-data"
+import type { LearningBoard } from "./learning-routes"
 
 export type TeachingStage = "locate" | "explain" | "apply" | "retain"
 export type TeachingQuestionKind = "recall" | "application" | "transfer" | "review"
@@ -12,26 +13,26 @@ export interface TeachingConnection {
 }
 
 export interface TeachingVisualBrief {
-  kind: "source" | "mermaid" | "image" | "none"
+  kind: "image" | "none"
   title: string
   reason: string
-  mermaid?: string
   imagePrompt?: string
-  sourceImage?: string
+  cacheFingerprint?: string
 }
 
 export interface TeachingLesson {
+  schemaVersion: 2
   nodeId: string
   sourceFingerprint: string
   essence: string
   explanation: string
-  analogy: string
-  commonMistake: string
-  connections: TeachingConnection[]
-  recallQuestion: string
-  applicationQuestion: string
-  transferQuestion: string
-  visual: TeachingVisualBrief
+  mechanism: string
+  example: string
+  counterexample: string
+  relationshipExplanation: string
+  checkQuestion: string
+  conceptVisual: TeachingVisualBrief
+  relationshipVisual: TeachingVisualBrief
   preparedAt: string
 }
 
@@ -69,6 +70,9 @@ export interface TeachingContext {
   sourcePath?: string
   sourceImage?: string
   sourceFingerprint: string
+  learningBoard?: LearningBoard
+  learningBoardFingerprint?: string
+  learningBoardNodes: LearningNode[]
   priorAttempts: TeachingAttempt[]
   currentMastery: LearningMastery
 }

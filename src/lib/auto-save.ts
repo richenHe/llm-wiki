@@ -81,6 +81,13 @@ export async function runWithSuspendedAutoSave<T>(
 }
 
 export function setupAutoSave(): void {
+  useWikiStore.subscribe((state, previous) => {
+    if (suspended || state.dataVersion === previous.dataVersion || !state.project) return
+    import("@/features/learning/learning-route-refresh").then(({ scheduleLearningRouteRefresh }) => {
+      scheduleLearningRouteRefresh({ id: state.project!.id, path: state.project!.path }, 8_000)
+    }).catch(() => {})
+  })
+
   // Auto-save review items (debounced 1s)
   useReviewStore.subscribe((state) => {
     if (suspended) return
