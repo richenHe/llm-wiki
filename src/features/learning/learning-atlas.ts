@@ -55,22 +55,7 @@ export function buildLearningAtlasFromGraph(graph: {
     const ranked = [...members].sort((a, b) => b.linkCount - a.linkCount || a.label.localeCompare(b.label, "zh-CN"))
     const learningOrder = [...members].sort((a, b) => a.path.localeCompare(b.path, "zh-CN", { numeric: true }) || a.label.localeCompare(b.label, "zh-CN"))
     const anchor = ranked[0]
-    const regionId = `atlas-region-${communityId}`
     const regionTitle = anchor?.label ?? `主题 ${regionIndex + 1}`
-    nodes.push({
-      id: regionId,
-      title: regionTitle,
-      glyph: glyph(regionTitle),
-      essence: `这一知识区域包含 ${members.length} 个相互关联的概念。`,
-      parentId: null,
-      prerequisiteIds: [],
-      source: "当前项目知识库",
-      sourceDetail: `${members.length} 个知识页`,
-      capabilities: ["建立框架", "发现联系"],
-      mastery: "unseen",
-      position: { x: 50, y: 16 },
-      kind: "region",
-    })
 
     learningOrder.forEach((member) => {
       nodes.push({
@@ -78,7 +63,7 @@ export function buildLearningAtlasFromGraph(graph: {
         title: member.label,
         glyph: glyph(member.label),
         essence: member.summary ?? `理解“${member.label}”在当前知识体系中的含义与联系。`,
-        parentId: regionId,
+        parentId: member.id === anchor?.id ? null : anchor?.id ?? null,
         prerequisiteIds: [],
         source: "当前项目知识库",
         sourceDetail: member.path,
@@ -90,33 +75,14 @@ export function buildLearningAtlasFromGraph(graph: {
         linkCount: member.linkCount,
         semanticType: member.type,
       })
-      for (const outline of member.outline ?? []) {
-        nodes.push({
-          id: outline.id,
-          title: outline.title,
-          glyph: glyph(outline.title),
-          essence: outline.summary,
-          parentId: outline.parentId ?? member.id,
-          prerequisiteIds: [],
-          source: member.label,
-          sourceDetail: `${member.path} / ${outline.title}`,
-          capabilities: ["逐层理解"],
-          mastery: "unseen",
-          position: { x: 50, y: 50 },
-          kind: "concept",
-          sourcePath: member.path,
-          linkCount: 0,
-          semanticType: member.type,
-        })
-      }
     })
 
     regions.push({
-      id: regionId,
+      id: `atlas-region-${communityId}`,
       title: regionTitle,
       color: COLORS[regionIndex % COLORS.length],
       position: regionPosition(regionIndex, visibleRegionCount),
-      nodeIds: [regionId, ...learningOrder.map((member) => member.id)],
+      nodeIds: learningOrder.map((member) => member.id),
     })
   })
 
@@ -124,5 +90,5 @@ export function buildLearningAtlasFromGraph(graph: {
 }
 
 export async function loadProjectLearningAtlas(projectPath: string): Promise<LearningAtlas> {
-  return buildLearningAtlasFromGraph(await buildWikiGraph(projectPath))
+  return buildLearningAtlasFromGraph(await buildWikiGraph(projectPath, { excludeStructural: true }))
 }

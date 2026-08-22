@@ -120,6 +120,29 @@ describe("buildWikiGraph frontmatter extraction", () => {
     expect(graph.edges).toContainEqual(expect.objectContaining({ source: "overview", target: "concepts/index" }))
   })
 
+  it("can exclude structural project pages before building learning communities", async () => {
+    const buildWikiGraph = await loadBuildWikiGraph()
+    mockListDirectory.mockResolvedValue([
+      mdFile("index.md"),
+      mdFile("overview.md"),
+      mdFile("log.md"),
+      mdFileAt("concepts", "biology.md"),
+      mdFileAt("concepts", "physics.md"),
+    ])
+    mockReadFile.mockImplementation(async (path: string) => {
+      if (path.endsWith("index.md")) return "# Wiki Index\n\n[[concepts/biology]] [[concepts/physics]]"
+      if (path.endsWith("overview.md")) return "# Project Overview\n\n[[concepts/biology]]"
+      if (path.endsWith("log.md")) return "# Research Log\n\n[[concepts/physics]]"
+      if (path.endsWith("biology.md")) return "---\ntitle: 生物\ntype: concept\n---\n# 生物\n"
+      return "---\ntitle: 物理\ntype: concept\n---\n# 物理\n"
+    })
+
+    const graph = await buildWikiGraph("/project", { excludeStructural: true })
+
+    expect(graph.nodes.map((node) => node.id).sort()).toEqual(["concepts/biology", "concepts/physics"])
+    expect(graph.edges).toEqual([])
+  })
+
   it("builds graph edges from related frontmatter without requiring a body wikilink", async () => {
     const buildWikiGraph = await loadBuildWikiGraph()
     mockListDirectory.mockResolvedValue([

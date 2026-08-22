@@ -4,6 +4,7 @@ import { buildRetrievalGraph, calculateRelevance } from "./graph-relevance"
 import { normalizePath } from "@/lib/path-utils"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { parseFrontmatterArray } from "@/lib/sources-merge"
+import { isStructuralGraphNode } from "@/lib/graph-structure"
 import Graph from "graphology"
 import louvain from "graphology-communities-louvain"
 
@@ -154,6 +155,10 @@ function extractType(content: string): string {
   return "other"
 }
 
+export interface BuildWikiGraphOptions {
+  excludeStructural?: boolean
+}
+
 function extractSummary(content: string, title: string): string {
   const body = content
     .replace(/^---[\s\S]*?---\s*/m, "")
@@ -218,6 +223,7 @@ function filePathToId(filePath: string, wikiRoot: string): string {
 
 export async function buildWikiGraph(
   projectPath: string,
+  options: BuildWikiGraphOptions = {},
 ): Promise<{ nodes: GraphNode[]; edges: GraphEdge[]; communities: CommunityInfo[] }> {
   const wikiRoot = `${normalizePath(projectPath)}/wiki`
 
@@ -266,7 +272,7 @@ export async function buildWikiGraph(
   // extracted from them via auto-ingest are what belong in the graph.
   const HIDDEN_TYPES = new Set(["query"])
   for (const [id, node] of nodeMap) {
-    if (HIDDEN_TYPES.has(node.type)) {
+    if (HIDDEN_TYPES.has(node.type) || (options.excludeStructural && isStructuralGraphNode(node))) {
       nodeMap.delete(id)
     }
   }
