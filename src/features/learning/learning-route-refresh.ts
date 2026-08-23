@@ -15,7 +15,7 @@ export interface LearningRouteProjectRef {
 }
 
 const INCLUDED_TYPES = new Set(["concept", "entity", "comparison"])
-const ROUTE_GENERATOR_VERSION = 3
+const ROUTE_GENERATOR_VERSION = 4
 const STALE_RETRY_DELAY_MS = 20_000
 const scheduledTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const activeControllers = new Map<string, AbortController>()

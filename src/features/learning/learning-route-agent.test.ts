@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { buildLearningRouteProposalScopes, sanitizeBoardProposals, sanitizeProposalNodeDecisions, sanitizeReviewedBoards, type LearningRouteCandidate } from "./learning-route-agent"
+import { buildLearningRouteProposalScopes, sanitizeBoardProposals, sanitizeBoardRelations, sanitizeProposalNodeDecisions, sanitizeReviewedBoards, type LearningRouteCandidate } from "./learning-route-agent"
 
 const IDS = new Set(["inheritance", "variation", "heritable", "environmental"])
 
@@ -125,11 +125,27 @@ describe("learning route AI result validation", () => {
         { nodeId: "variation", phrase: "再辨差异" },
         { nodeId: "heritable", phrase: "基因改变才能传" },
       ],
+      relations: [
+        { sourceId: "inheritance", targetId: "variation", kind: "prerequisite", label: "理解前置", evidence: "先理解遗传再判断差异。" },
+        { sourceId: "variation", targetId: "heritable", kind: "prerequisite", label: "理解前置", evidence: "先理解变异再判断能否遗传。" },
+      ],
     }
 
     expect(sanitizeReviewedBoards([base], IDS)).toHaveLength(1)
     expect(sanitizeReviewedBoards([{ ...base, mnemonicParts: base.mnemonicParts.slice(0, 2) }], IDS)).toEqual([])
     expect(sanitizeReviewedBoards([{ ...base, evidence: base.evidence.slice(0, 2) }], IDS)).toEqual([])
     expect(sanitizeReviewedBoards([{ ...base, confidence: 0.7 }], IDS)).toEqual([])
+  })
+
+  it("accepts only a connected, evidence-backed relation map", () => {
+    const nodeIds = ["inheritance", "variation", "heritable"]
+    const valid = [
+      { sourceId: "inheritance", targetId: "variation", kind: "prerequisite", label: "理解前置", evidence: "先理解遗传再判断差异。" },
+      { sourceId: "variation", targetId: "heritable", kind: "prerequisite", label: "判断类型", evidence: "遗传物质变化决定能否遗传。" },
+    ]
+
+    expect(sanitizeBoardRelations(valid, nodeIds, "prerequisite", nodeIds)).toHaveLength(2)
+    expect(sanitizeBoardRelations(valid.slice(0, 1), nodeIds, "prerequisite", nodeIds)).toEqual([])
+    expect(sanitizeBoardRelations([{ ...valid[0], label: "关系" }, valid[1]], nodeIds, "prerequisite", nodeIds)).toEqual([])
   })
 })

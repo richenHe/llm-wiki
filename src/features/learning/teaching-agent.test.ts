@@ -37,6 +37,7 @@ const context: TeachingContext = {
     confidence: 0.95,
     mnemonic: "缓存重在临时复用，存储重在长期保留。",
     mnemonicParts: [],
+    relations: [],
   },
   learningBoardFingerprint: "board-abc",
   learningBoardNodes: [

@@ -68,6 +68,7 @@ describe("learning route exhaustive AI processing", () => {
               { nodeId: "quadratic", detail: "图象与横轴交点对应方程根。" },
               { nodeId: "equation", detail: "利用交点判断实数根。" },
             ],
+            relations: [{ sourceId: "quadratic", targetId: "equation", kind: "prerequisite", label: "理解前置", evidence: "先理解函数图象，再由交点判断方程根。" }],
             mnemonic: "先画二次线，再从交点看方程。",
             mnemonicParts: [
               { nodeId: "quadratic", phrase: "先画二次线" },
@@ -121,6 +122,7 @@ describe("learning route exhaustive AI processing", () => {
           ...proposal,
           approved: true,
           evidence: nodeIds.map((nodeId) => ({ nodeId, detail: `${nodeId}的详情支持这一并列关系。` })),
+          relations: [{ sourceId: nodeIds[0], targetId: nodeIds[1], kind: "connection", label: "同类并列", evidence: "两项使用同一分类标准。" }],
           mnemonic: nodeIds.join("并"),
           mnemonicParts: nodeIds.map((nodeId) => ({ nodeId, phrase: nodeId })),
         }],

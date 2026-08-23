@@ -89,6 +89,7 @@ export async function buildTeachingContext(input: {
       evidence: learningBoard.evidence,
       mnemonic: learningBoard.mnemonic,
       mnemonicParts: learningBoard.mnemonicParts,
+      relations: learningBoard.relations,
     }))
     : undefined
   return {

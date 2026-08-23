@@ -15,8 +15,8 @@ describe("learning board selection", () => {
         nodeIds: ["inheritance", "variation", "health"],
         status: "ready",
         boards: [
-          { id: "wide", title: "宽板块", centralQuestion: "?", kind: "category", nodeIds: ["variation", "health", "evolution"], orderedNodeIds: ["variation", "health", "evolution"], reason: "test", evidence: [], confidence: 0.8, mnemonic: "test", mnemonicParts: [] },
-          { id: "focused", title: "遗传与变异", centralQuestion: "?", kind: "prerequisite", nodeIds: ["inheritance", "variation"], orderedNodeIds: ["inheritance", "variation"], reason: "test", evidence: [], confidence: 0.93, mnemonic: "test", mnemonicParts: [] },
+          { id: "wide", title: "宽板块", centralQuestion: "?", kind: "category", nodeIds: ["variation", "health", "evolution"], orderedNodeIds: ["variation", "health", "evolution"], reason: "test", evidence: [], confidence: 0.8, mnemonic: "test", mnemonicParts: [], relations: [] },
+          { id: "focused", title: "遗传与变异", centralQuestion: "?", kind: "prerequisite", nodeIds: ["inheritance", "variation"], orderedNodeIds: ["inheritance", "variation"], reason: "test", evidence: [], confidence: 0.93, mnemonic: "test", mnemonicParts: [], relations: [] },
         ],
         decisions: [
           { nodeId: "inheritance", status: "linked", boardIds: ["focused"], reason: "test" },

@@ -1,6 +1,15 @@
 import type { LearningNode } from "./learning-data"
 
 export type LearningBoardKind = "category" | "process" | "prerequisite"
+export type LearningBoardRelationKind = "connection" | "prerequisite" | "process" | "application"
+
+export interface LearningBoardRelation {
+  sourceId: string
+  targetId: string
+  kind: LearningBoardRelationKind
+  label: string
+  evidence: string
+}
 
 export interface LearningMnemonicPart {
   nodeId: string
@@ -24,6 +33,7 @@ export interface LearningBoard {
   confidence: number
   mnemonic: string
   mnemonicParts: LearningMnemonicPart[]
+  relations: LearningBoardRelation[]
 }
 
 export interface LearningRouteNodeDecision {

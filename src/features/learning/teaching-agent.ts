@@ -14,6 +14,7 @@ function contextText(context: TeachingContext): string {
     `板块知识：${context.learningBoardNodes.map(compactNode).join(board.kind === "category" ? " · " : " → ")}`,
     `归类理由：${board.reason}`,
     `节点依据：${board.evidence.map((item) => `${context.learningBoardNodes.find((node) => node.id === item.nodeId)?.title ?? item.nodeId}：${item.detail}`).join("；")}`,
+    `审核关系：${board.relations.map((relation) => `${context.learningBoardNodes.find((node) => node.id === relation.sourceId)?.title ?? relation.sourceId}—${relation.label}—${context.learningBoardNodes.find((node) => node.id === relation.targetId)?.title ?? relation.targetId}`).join("；") || "旧版串联尚无逐条关系"}`,
     `顺口溜：${board.mnemonic}`,
     `精华句对应：${board.mnemonicParts.map((item) => `${item.nodeId}：${item.phrase}`).join("；")}`,
   ].join("\n") : "当前知识尚未进入证据充分的串联板块；不要为了建立关系而强行关联。"

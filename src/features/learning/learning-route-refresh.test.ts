@@ -59,6 +59,7 @@ const BOARD: LearningBoard = {
     { nodeId: "inheritance", phrase: "先遗传" },
     { nodeId: "variation", phrase: "再看变" },
   ],
+  relations: [{ sourceId: "inheritance", targetId: "variation", kind: "prerequisite", label: "理解前置", evidence: "先理解遗传，才能判断亲子差异。" }],
 }
 
 const DECISIONS = [

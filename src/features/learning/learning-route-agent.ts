@@ -1,7 +1,7 @@
 import { streamChat, type ChatMessage } from "@/lib/llm-client"
 import type { LlmConfig } from "@/stores/wiki-store"
 import type { GraphOutlineNode } from "@/lib/wiki-graph"
-import type { LearningBoard, LearningBoardKind, LearningRouteNodeDecision } from "./learning-routes"
+import type { LearningBoard, LearningBoardKind, LearningBoardRelation, LearningBoardRelationKind, LearningRouteNodeDecision } from "./learning-routes"
 
 export interface LearningRouteCandidate {
   id: string
@@ -36,6 +36,8 @@ export interface LearningRouteGenerationResult {
 }
 
 const BOARD_KINDS = new Set<LearningBoardKind>(["category", "process", "prerequisite"])
+const RELATION_KINDS = new Set<LearningBoardRelationKind>(["connection", "prerequisite", "process", "application"])
+const VAGUE_RELATION_LABELS = new Set(["相关", "有关", "联系", "关系"])
 const MIN_APPROVED_CONFIDENCE = 0.78
 const MAX_BOARD_SIZE = 8
 const MAX_BOARDS_PER_PROPOSAL = 18
@@ -181,6 +183,52 @@ function stableBoardId(board: Pick<BoardProposal, "kind" | "nodeIds">): string {
   return `learning-board-${(hash >>> 0).toString(36)}`
 }
 
+export function sanitizeBoardRelations(value: unknown, nodeIds: readonly string[], boardKind: LearningBoardKind, orderedNodeIds: readonly string[]): LearningBoardRelation[] {
+  if (!Array.isArray(value)) return []
+  const allowedIds = new Set(nodeIds)
+  const relations: LearningBoardRelation[] = []
+  const seenPairs = new Set<string>()
+  for (const item of value.slice(0, Math.min(16, nodeIds.length * 2))) {
+    if (!item || typeof item !== "object") continue
+    const raw = item as Record<string, unknown>
+    const sourceId = cleanString(raw.sourceId)
+    const targetId = cleanString(raw.targetId)
+    const kind = RELATION_KINDS.has(raw.kind as LearningBoardRelationKind) ? raw.kind as LearningBoardRelationKind : null
+    const label = cleanString(raw.label)
+    const evidence = cleanString(raw.evidence)
+    const pairKey = [sourceId, targetId].sort().join(":::")
+    if (
+      !kind || !allowedIds.has(sourceId) || !allowedIds.has(targetId) || sourceId === targetId
+      || !label || Array.from(label).length > 10 || VAGUE_RELATION_LABELS.has(label) || !evidence || seenPairs.has(pairKey)
+    ) continue
+    seenPairs.add(pairKey)
+    relations.push({ sourceId, targetId, kind, label, evidence })
+  }
+  if (relations.length < nodeIds.length - 1) return []
+  const connected = new Set<string>([nodeIds[0]])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const relation of relations) {
+      if (connected.has(relation.sourceId) && !connected.has(relation.targetId)) {
+        connected.add(relation.targetId)
+        changed = true
+      } else if (connected.has(relation.targetId) && !connected.has(relation.sourceId)) {
+        connected.add(relation.sourceId)
+        changed = true
+      }
+    }
+  }
+  if (connected.size !== nodeIds.length) return []
+  if (boardKind === "process" || boardKind === "prerequisite") {
+    const requiredKind = boardKind
+    for (let index = 0; index < orderedNodeIds.length - 1; index++) {
+      if (!relations.some((relation) => relation.sourceId === orderedNodeIds[index] && relation.targetId === orderedNodeIds[index + 1] && relation.kind === requiredKind)) return []
+    }
+  }
+  return relations
+}
+
 export function sanitizeReviewedBoards(value: unknown, allowedIds: ReadonlySet<string>): LearningBoard[] {
   if (!Array.isArray(value)) return []
   const boards: LearningBoard[] = []
@@ -213,9 +261,10 @@ export function sanitizeReviewedBoards(value: unknown, allowedIds: ReadonlySet<s
     const evidenceIds = new Set(evidence.map((entry) => entry.nodeId))
     const mnemonicIds = new Set(mnemonicParts.map((entry) => entry.nodeId))
     const mnemonic = cleanString(raw.mnemonic)
+    const relations = sanitizeBoardRelations(raw.relations, proposal.nodeIds, proposal.kind, proposal.orderedNodeIds)
     if (
       !mnemonic || !proposal.nodeIds.every((id) => evidenceIds.has(id))
-      || !proposal.nodeIds.every((id) => mnemonicIds.has(id))
+      || !proposal.nodeIds.every((id) => mnemonicIds.has(id)) || relations.length === 0
     ) continue
     const id = stableBoardId(proposal)
     if (seen.has(id)) continue
@@ -226,6 +275,7 @@ export function sanitizeReviewedBoards(value: unknown, allowedIds: ReadonlySet<s
       evidence: evidence.filter((entry) => proposal.nodeIds.includes(entry.nodeId)),
       mnemonic,
       mnemonicParts: mnemonicParts.filter((entry) => proposal.nodeIds.includes(entry.nodeId)),
+      relations,
     })
   }
   return boards
@@ -330,11 +380,14 @@ function auditSystemPrompt(): string {
 - 人物、案例、方法、现象、宽泛章节不得仅因有关而混成同类。
   - 板块保持2至8项；可以删项或拒绝，但不得添加候选之外的节点。
 - evidence必须为每个成员提供来自详情的简短转述，不能编造。
+- relations必须给出一张最小而完整的知识关系图：所有成员必须连通，每条关系都要有sourceId、targetId、kind、2至10字的明确label和来自详情的evidence。只保留理解所需关系，通常为成员数减一条，最多为成员数的两倍，不得生成任意两两连线。
+- relation kind只有四种：connection表示性质、表示、对应等不应冒充先后的联系；prerequisite表示理解前置；process表示真实过程或变化顺序；application表示方法用于对象。label必须写清“图像表示、根与交点对应、具有特征、用于确定”等具体含义，禁止只写“相关、关系、联系”。
+- process板块的每对相邻orderedNodeIds必须有同方向process关系；prerequisite板块的每对相邻orderedNodeIds必须有同方向prerequisite关系。顺口溜只能概括审核后的关系，不能反过来作为关系证据。
 - 只有板块审核通过后才生成顺口溜。mnemonicParts必须逐项覆盖成员，让每个短语能对应一个知识点；顺口溜不得改变知识含义。
 
   输入中的每个proposalId都必须在reviews中恰好出现一次，不能遗漏。通过时approved=true并返回完整板块；拒绝时approved=false并返回具体rejectionReason。
 
-  只返回JSON：{"reviews":[{"proposalId":"输入中的id","approved":true,"title":"板块名","centralQuestion":"共同问题","kind":"category|process|prerequisite","nodeIds":["id"],"orderedNodeIds":["id"],"reason":"复核后的理由","confidence":0.0,"evidence":[{"nodeId":"id","detail":"来自详情的依据"}],"mnemonic":"完整顺口溜","mnemonicParts":[{"nodeId":"id","phrase":"对应短语"}]},{"proposalId":"输入中的id","approved":false,"rejectionReason":"拒绝的具体依据"}]}`
+  只返回JSON：{"reviews":[{"proposalId":"输入中的id","approved":true,"title":"板块名","centralQuestion":"共同问题","kind":"category|process|prerequisite","nodeIds":["id"],"orderedNodeIds":["id"],"reason":"复核后的理由","confidence":0.0,"evidence":[{"nodeId":"id","detail":"来自详情的依据"}],"relations":[{"sourceId":"id","targetId":"id","kind":"connection|prerequisite|process|application","label":"明确关系","evidence":"支持这条连线的详情依据"}],"mnemonic":"完整顺口溜","mnemonicParts":[{"nodeId":"id","phrase":"对应短语"}]},{"proposalId":"输入中的id","approved":false,"rejectionReason":"拒绝的具体依据"}]}`
 }
 
 function detailText(candidate: LearningRouteCandidate): string {

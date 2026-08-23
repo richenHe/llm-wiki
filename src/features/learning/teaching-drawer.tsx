@@ -3,8 +3,8 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { loadTeachingImageConfig } from "@/lib/project-store"
 import type { LearningMastery, LearningNode, LearningRelation } from "./learning-data"
+import { LearningRelationMap } from "./learning-relation-map"
 import type { LearningBoard } from "./learning-routes"
-import { learningBoardNodes } from "./learning-routes"
 import { useLearningStore } from "./learning-store"
 import { evaluateTeachingAnswer, prepareTeachingLesson } from "./teaching-agent"
 import { buildTeachingContext } from "./teaching-context"
@@ -20,9 +20,9 @@ const VERDICT_LABEL = {
 } as const
 
 const BOARD_LABELS = {
-  category: { name: "同类并列", connector: "·" },
-  process: { name: "实际过程", connector: "→" },
-  prerequisite: { name: "理解前置", connector: "→" },
+  category: "知识联系",
+  process: "实际过程",
+  prerequisite: "理解前置",
 } as const
 
 function friendlyTeachingError(error: unknown): string {
@@ -116,7 +116,6 @@ export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, l
   const recordAttempt = useLearningStore((state) => state.recordAttempt)
   const session = sessionsByNode[node.id] ?? { activeStage: "locate" as const }
   const lesson = session.lesson?.schemaVersion === 3 ? session.lesson : undefined
-  const boardNodes = useMemo(() => learningBoard ? learningBoardNodes(learningBoard, nodes) : [], [learningBoard, nodes])
   const latestAttempt = useMemo(() => {
     const matching = attempts.filter((attempt) => attempt.nodeId === node.id && attempt.question === lesson?.checkQuestion)
     return matching[matching.length - 1]
@@ -196,10 +195,10 @@ export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, l
 
         {learningBoard && <section>
           <div className="text-xs font-medium text-violet-700">知识关联</div>
-          <div className="mt-2 rounded-xl border border-violet-100 bg-violet-50/50 p-3">
-            <div className="flex items-center justify-between gap-3"><strong className="text-sm">{learningBoard.title}</strong><span className="shrink-0 text-[10px] text-violet-700">{BOARD_LABELS[learningBoard.kind].name}</span></div>
-            <div className="mt-3 flex flex-wrap items-center gap-1.5">{boardNodes.map((item, index) => <span key={item.id} className="flex items-center gap-1.5"><button type="button" onClick={() => onSelect(item.id)} className={item.id === node.id ? "rounded-full border border-blue-600 bg-blue-600 px-2.5 py-1 text-xs text-white" : "rounded-full border bg-white px-2.5 py-1 text-xs text-slate-700"}>{item.title}</button>{index < boardNodes.length - 1 && <span className="text-slate-400">{BOARD_LABELS[learningBoard.kind].connector}</span>}</span>)}</div>
-            <p className="mt-2 text-xs leading-5 text-slate-600">{lesson.relationshipExplanation}</p>
+          <div className="mt-2 overflow-hidden rounded-xl border border-violet-100 bg-violet-50/30">
+            <div className="flex items-start justify-between gap-3 border-b border-violet-100 bg-white px-3 py-3"><div><strong className="text-sm text-slate-800">{learningBoard.title}</strong><p className="mt-1 text-xs leading-5 text-slate-500">{learningBoard.centralQuestion}</p></div><span className="shrink-0 rounded-md bg-violet-50 px-2 py-1 text-[10px] font-medium text-violet-700">{BOARD_LABELS[learningBoard.kind]}</span></div>
+            <div className="bg-white/70 px-2 py-3"><LearningRelationMap board={learningBoard} nodes={nodes} currentNodeId={node.id} onSelect={onSelect} /></div>
+            <p className="border-t border-violet-100 px-3 py-3 text-xs leading-5 text-slate-600">{lesson.relationshipExplanation}</p>
           </div>
         </section>}
 

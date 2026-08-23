@@ -2,6 +2,8 @@ import { fileExists, readFile, writeFileAtomic } from "@/commands/fs"
 import type {
   LearningBoard,
   LearningBoardKind,
+  LearningBoardRelation,
+  LearningBoardRelationKind,
   LearningRouteCommunitySnapshot,
   LearningRouteNodeDecision,
   LearningRouteSnapshot,
@@ -9,6 +11,8 @@ import type {
 
 const ROUTES_RELATIVE_PATH = ".llm-wiki/learning/routes.json"
 const BOARD_KINDS = new Set<LearningBoardKind>(["category", "process", "prerequisite"])
+const RELATION_KINDS = new Set<LearningBoardRelationKind>(["connection", "prerequisite", "process", "application"])
+const VAGUE_RELATION_LABELS = new Set(["相关", "有关", "联系", "关系"])
 
 function routesPath(projectPath: string): string {
   return `${projectPath.replace(/[\\/]+$/, "")}/${ROUTES_RELATIVE_PATH}`
@@ -29,6 +33,53 @@ function nonEmptyString(value: unknown): value is string {
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return [...new Set(value.filter(nonEmptyString).map((item) => item.trim()))]
+}
+
+function parseRelations(value: unknown, nodeIds: readonly string[]): LearningBoardRelation[] {
+  if (!Array.isArray(value)) return []
+  const allowedIds = new Set(nodeIds)
+  const seenPairs = new Set<string>()
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return []
+    const relation = item as Record<string, unknown>
+    const sourceId = nonEmptyString(relation.sourceId) ? relation.sourceId.trim() : ""
+    const targetId = nonEmptyString(relation.targetId) ? relation.targetId.trim() : ""
+    const kind = RELATION_KINDS.has(relation.kind as LearningBoardRelationKind) ? relation.kind as LearningBoardRelationKind : null
+    const label = nonEmptyString(relation.label) ? relation.label.trim() : ""
+    const evidence = nonEmptyString(relation.evidence) ? relation.evidence.trim() : ""
+    const pairKey = [sourceId, targetId].sort().join(":::")
+    if (!kind || !allowedIds.has(sourceId) || !allowedIds.has(targetId) || sourceId === targetId || !label || Array.from(label).length > 10 || VAGUE_RELATION_LABELS.has(label) || !evidence || seenPairs.has(pairKey)) return []
+    seenPairs.add(pairKey)
+    return [{ sourceId, targetId, kind, label, evidence }]
+  })
+}
+
+function relationsConnectAll(relations: readonly LearningBoardRelation[], nodeIds: readonly string[]): boolean {
+  if (relations.length < nodeIds.length - 1) return false
+  const connected = new Set<string>([nodeIds[0]])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const relation of relations) {
+      if (connected.has(relation.sourceId) && !connected.has(relation.targetId)) {
+        connected.add(relation.targetId)
+        changed = true
+      } else if (connected.has(relation.targetId) && !connected.has(relation.sourceId)) {
+        connected.add(relation.sourceId)
+        changed = true
+      }
+    }
+  }
+  return connected.size === nodeIds.length
+}
+
+function relationsMatchOrderedBoard(relations: readonly LearningBoardRelation[], kind: LearningBoardKind, orderedNodeIds: readonly string[]): boolean {
+  if (kind === "category") return true
+  return orderedNodeIds.slice(0, -1).every((sourceId, index) => relations.some((relation) => (
+    relation.sourceId === sourceId
+    && relation.targetId === orderedNodeIds[index + 1]
+    && relation.kind === kind
+  )))
 }
 
 function parseBoard(value: unknown): LearningBoard | null {
@@ -60,6 +111,7 @@ function parseBoard(value: unknown): LearningBoard | null {
     || !nonEmptyString(board.centralQuestion) || !nonEmptyString(board.reason)
     || !nonEmptyString(board.mnemonic) || nodeIds.length < 2 || nodeIds.length > 8
   ) return null
+  const reason = board.reason.trim()
   const nodeIdSet = new Set(nodeIds)
   const effectiveOrder = kind === "category" ? nodeIds : orderedNodeIds
   if (effectiveOrder.length !== nodeIds.length || !effectiveOrder.every((id) => nodeIdSet.has(id))) return null
@@ -67,6 +119,17 @@ function parseBoard(value: unknown): LearningBoard | null {
   if (!nodeIds.every((id) => mnemonicParts.some((entry) => entry.nodeId === id))) return null
   const confidence = Number(board.confidence)
   if (!Number.isFinite(confidence) || confidence < 0.78) return null
+  let relations = parseRelations(board.relations, nodeIds)
+  if (!relationsConnectAll(relations, nodeIds) || !relationsMatchOrderedBoard(relations, kind, effectiveOrder)) relations = []
+  if (relations.length === 0 && kind !== "category") {
+    relations = effectiveOrder.slice(0, -1).map((sourceId, index) => ({
+      sourceId,
+      targetId: effectiveOrder[index + 1],
+      kind,
+      label: kind === "process" ? "接着发生" : "理解前置",
+      evidence: reason,
+    }))
+  }
   return {
     id: board.id.trim(),
     title: board.title.trim(),
@@ -74,11 +137,12 @@ function parseBoard(value: unknown): LearningBoard | null {
     kind,
     nodeIds,
     orderedNodeIds: effectiveOrder,
-    reason: board.reason.trim(),
+    reason,
     evidence,
     confidence: Math.min(1, confidence),
     mnemonic: board.mnemonic.trim(),
     mnemonicParts,
+    relations,
   }
 }
 

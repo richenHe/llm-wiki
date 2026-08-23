@@ -32,6 +32,13 @@ describe("learning route persistence", () => {
             { nodeId: "inheritance", phrase: "先遗传" },
             { nodeId: "variation", phrase: "再看变" },
           ],
+          relations: [{
+            sourceId: "inheritance",
+            targetId: "variation",
+            kind: "prerequisite",
+            label: "理解前置",
+            evidence: "先理解亲代信息传递，再判断后代差异。",
+          }],
         }],
         decisions: [
           { nodeId: "inheritance", status: "linked", boardIds: ["board-1"], reason: "已进入遗传与变异板块。" },
@@ -42,6 +49,7 @@ describe("learning route persistence", () => {
 
     expect(result?.status).toBe("ready")
     expect(result?.communities[0].boards[0].mnemonic).toBe("先遗传，再看变。")
+    expect(result?.communities[0].boards[0].relations[0].label).toBe("理解前置")
   })
 
   it("marks the whole snapshot stale when any community needs regeneration", () => {
@@ -108,6 +116,7 @@ describe("learning route persistence", () => {
 
     expect(result?.status).toBe("stale")
     expect(result?.communities[0].boards).toHaveLength(1)
+    expect(result?.communities[0].boards[0].relations[0]).toMatchObject({ sourceId: "quadratic", targetId: "equation", kind: "prerequisite" })
     expect(result?.progress).toEqual({ processed: 2, total: 3 })
   })
 })

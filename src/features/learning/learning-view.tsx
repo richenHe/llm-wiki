@@ -91,6 +91,7 @@ const SAMPLE_ROUTE_SNAPSHOT: LearningRouteSnapshot = {
       confidence: 1,
       mnemonic: "位移定变化，速度看快慢，加速看速度变，图像把规律串。",
       mnemonicParts: [],
+      relations: [{ sourceId: "displacement", targetId: "velocity", kind: "prerequisite", label: "理解前置", evidence: "先确定位置变化，再描述变化快慢。" }, { sourceId: "velocity", targetId: "acceleration", kind: "prerequisite", label: "理解前置", evidence: "先理解速度，再理解速度的变化。" }, { sourceId: "acceleration", targetId: "motion-graph", kind: "prerequisite", label: "综合表示", evidence: "运动图像综合呈现速度和加速度规律。" }],
     }],
     decisions: ["displacement", "velocity", "acceleration", "motion-graph"].map((nodeId) => ({
       nodeId,
