@@ -15,7 +15,7 @@ export interface LearningRouteProjectRef {
 }
 
 const INCLUDED_TYPES = new Set(["concept", "entity", "comparison"])
-const ROUTE_GENERATOR_VERSION = 4
+const LEGACY_ROUTE_GENERATOR_VERSIONS = [3, 4] as const
 const STALE_RETRY_DELAY_MS = 20_000
 const scheduledTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const activeControllers = new Map<string, AbortController>()
@@ -107,17 +107,20 @@ async function buildCandidates(
 async function communityIdentity(
   candidates: readonly LearningRouteCandidate[],
   internalEdges: readonly string[],
-): Promise<{ key: string; fingerprint: string }> {
+): Promise<{ key: string; fingerprint: string; legacyFingerprints: ReadonlySet<string> }> {
   const nodeIds = candidates.map((candidate) => candidate.id).sort()
   const key = await sha256(nodeIds.join("\n"))
-  const fingerprint = await sha256(JSON.stringify({
-    generatorVersion: ROUTE_GENERATOR_VERSION,
+  const knowledgeInput = {
     nodes: [...candidates]
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((candidate) => ({ id: candidate.id, content: candidate.content })),
     edges: [...internalEdges].sort(),
-  }))
-  return { key, fingerprint }
+  }
+  const [fingerprint, ...legacyFingerprints] = await Promise.all([
+    sha256(JSON.stringify(knowledgeInput)),
+    ...LEGACY_ROUTE_GENERATOR_VERSIONS.map((generatorVersion) => sha256(JSON.stringify({ generatorVersion, ...knowledgeInput }))),
+  ])
+  return { key, fingerprint, legacyFingerprints: new Set(legacyFingerprints) }
 }
 
 function staleSnapshot(
@@ -176,6 +179,7 @@ export async function refreshLearningRoutes(
   const processedKeys = new Set<string>()
   const totalCommunities = grouped.size
   let regenerated = false
+  let migratedFingerprint = false
 
   const saveProgress = async () => {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError")
@@ -206,10 +210,16 @@ export async function refreshLearningRoutes(
     const cached = previousByKey.get(identity.key)
     const cachedDecisionIds = new Set(cached?.decisions.map((decision) => decision.nodeId) ?? [])
     if (
-      cached?.status === "ready" && cached.fingerprint === identity.fingerprint
+      cached?.status === "ready"
+      && (cached.fingerprint === identity.fingerprint || identity.legacyFingerprints.has(cached.fingerprint))
       && candidates.every((candidate) => cachedDecisionIds.has(candidate.id))
     ) {
-      communities.push(cached)
+      if (cached.fingerprint === identity.fingerprint) {
+        communities.push(cached)
+      } else {
+        migratedFingerprint = true
+        communities.push({ ...cached, fingerprint: identity.fingerprint })
+      }
       continue
     }
 
@@ -255,7 +265,7 @@ export async function refreshLearningRoutes(
     return community.status === "stale" || !community.nodeIds.every((id) => decisionIds.has(id))
   })
   const processed = new Set(communities.flatMap((community) => community.decisions.map((decision) => decision.nodeId))).size
-  if (!regenerated && previous?.status === "ready") return previous
+  if (!regenerated && !migratedFingerprint && previous?.status === "ready") return previous
   const snapshot: LearningRouteSnapshot = {
     schemaVersion: 2,
     generatedAt: new Date().toISOString(),

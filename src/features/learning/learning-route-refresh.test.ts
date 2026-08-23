@@ -67,6 +67,19 @@ const DECISIONS = [
   { nodeId: "variation", status: "linked" as const, boardIds: ["genetics"], reason: "已进入遗传与变异板块。" },
 ]
 
+async function legacyFingerprint(generatorVersion: 3 | 4): Promise<string> {
+  const input = JSON.stringify({
+    generatorVersion,
+    nodes: [
+      { id: "inheritance", content: "D:/kb/wiki/遗传.md:v1" },
+      { id: "variation", content: "D:/kb/wiki/变异.md:v1" },
+    ],
+    edges: ["inheritance->variation:1"],
+  })
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input))
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("")
+}
+
 describe("learning route refresh", () => {
   beforeEach(() => {
     mocks.contentSuffix = "v1"
@@ -93,6 +106,21 @@ describe("learning route refresh", () => {
     expect(mocks.save.mock.calls[0][0].progress).toEqual({ processed: 2, total: 2 })
     expect(mocks.save.mock.calls[0][0].communities[0].boards).toEqual([BOARD])
     expect(mocks.save.mock.calls[1][0].status).toBe("ready")
+  })
+
+  it.each([3, 4] as const)("reuses version %s cache without asking AI to review all knowledge again", async (version) => {
+    await refreshLearningRoutes({ id: "project-1", path: "D:/kb" })
+    const oldFingerprint = await legacyFingerprint(version)
+    mocks.snapshot = {
+      ...mocks.snapshot!,
+      communities: mocks.snapshot!.communities.map((community) => ({ ...community, fingerprint: oldFingerprint })),
+    }
+
+    const result = await refreshLearningRoutes({ id: "project-1", path: "D:/kb" })
+
+    expect(mocks.generate).toHaveBeenCalledTimes(1)
+    expect(result.status).toBe("ready")
+    expect(result.communities[0].fingerprint).not.toBe(oldFingerprint)
   })
 
   it("regenerates a changed community and preserves its old board if AI fails", async () => {
