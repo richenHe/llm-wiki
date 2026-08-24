@@ -198,7 +198,6 @@ export function TeachingDrawer({ node, nodes, relations, projectPath, mastery, l
           <div className="mt-2 overflow-hidden rounded-xl border border-violet-100 bg-violet-50/30">
             <div className="flex items-start justify-between gap-3 border-b border-violet-100 bg-white px-3 py-3"><div><strong className="text-sm text-slate-800">{learningBoard.title}</strong><p className="mt-1 text-xs leading-5 text-slate-500">{learningBoard.centralQuestion}</p></div><span className="shrink-0 rounded-md bg-violet-50 px-2 py-1 text-[10px] font-medium text-violet-700">{BOARD_LABELS[learningBoard.kind]}</span></div>
             <div className="bg-white/70 px-2 py-3"><LearningRelationMap board={learningBoard} nodes={nodes} currentNodeId={node.id} onSelect={onSelect} /></div>
-            <p className="border-t border-violet-100 px-3 py-3 text-xs leading-5 text-slate-600">{lesson.relationshipExplanation}</p>
           </div>
         </section>}
 

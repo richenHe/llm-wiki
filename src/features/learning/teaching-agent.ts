@@ -61,7 +61,7 @@ function parseVisual(value: unknown, field: string, cacheFingerprint: string, co
   const focus = typeof visual.focus === "string" ? visual.focus.trim() : ""
   const form = typeof visual.form === "string" ? visual.form.trim() : "清晰教学示意图"
   const kind = visual.kind === "image" ? "image" : "none"
-  const generatedPrompt = `为普通学习者制作一张只靠画面帮助理解的“概念形象图”。主题：${context.node.title}。概念本质：${context.node.essence}。采用视觉形式：${form}。画面必须直观看出：${focus || context.node.essence}。固定要求：根据知识本身选择真实、准确的视觉表达；生物用形象结构或生命现象，物理和化学用物体、装置、现象或变化过程，电路用规范元件和真实电流路径，数学用无文字坐标轴、曲线、几何形状或数量关系，抽象概念用具体场景或鲜明对比。禁止出现任何可读文字，包括中文、英文、数字、公式、标题、说明、标签和水印；禁止知识卡片、表格、笔记、思维导图、流程图、关系图、信息图、网页或软件界面截图。画面不是文字排版，不能用大段留白承载说明。只能表现来源支持的内容，不补造结构、步骤、因果或数据。来源依据：${context.sourceExcerpt.slice(0, 4_000)}`
+  const generatedPrompt = `只生成一幅铺满画面的单一形象插图，不是教学海报、教材页面或知识总结。需要用画面表现的知识主题是“${context.node.title}”，但不得在图片中写出主题名称。概念本质：${context.node.essence}。视觉形式：${form}。画面只需要直观看出：${focus || context.node.essence}。根据知识本身选择真实、准确的对象、结构、装置、现象或变化；电路只画必要的电源、导线、开关、用电器和电流路径；数学只画无文字坐标轴、曲线、几何形状或数量关系。构图要求：一个连续场景或一个居中的主体，背景简洁，主体占据主要画面，不分栏，不留说明区。禁止出现任何可读文字或类似文字的符号，包括中文、英文、数字、公式、标题、说明、标签、水印和二维码；禁止侧边栏、知识卡片、表格、笔记、思维导图、流程图、关系图、信息图、网页、软件界面和排版海报。需要标签才能表达的内容直接省略标签。只能表现概念本身，不补造结构、步骤、因果或数据。`
   const imagePrompt = kind === "image" ? generatedPrompt : undefined
   return {
     kind,
@@ -105,7 +105,7 @@ function parseLesson(raw: string, context: TeachingContext): TeachingLesson {
     counterexample: conciseStringValue(value.counterexample, "反例或边界", 70),
     relationshipExplanation: conciseStringValue(value.relationshipExplanation, "串联关系说明", 80),
     checkQuestion: conciseStringValue(value.checkQuestion, "检查题", 60),
-    conceptVisual: parseVisual(value.conceptVisual, "概念形象图", `${context.sourceFingerprint}-concept-v3`, context),
+    conceptVisual: parseVisual(value.conceptVisual, "概念形象图", `${context.sourceFingerprint}-concept-pure-visual-v4`, context),
     relationshipVisual: {
       kind: "none",
       title: "知识关系",

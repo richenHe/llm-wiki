@@ -17,12 +17,20 @@ export const DEFAULT_TEACHING_IMAGE_CONFIG: TeachingImageConfig = {
   size: "1536x1024",
 }
 
+const TEACHING_IMAGE_POLICY_VERSION = "pure-visual-v2"
+const NO_TEXT_NEGATIVE_PROMPT = "文字，中文，英文，字母，数字，公式，标题，说明，注释，标签，图例，水印，二维码，页眉，页脚，侧边栏，卡片，表格，笔记，思维导图，流程图，关系图，信息图，网页，软件界面，截图，教材页面，排版海报"
+
+export function enforcePureVisualPrompt(prompt: string): string {
+  const sourceFreePrompt = prompt.split("来源依据：", 1)[0].trim()
+  return `只输出一幅无文字的单一形象画面。不要制作教学海报、教材页面、知识总结或带说明的示意板。画面必须是一个连续场景或一个主体，铺满画面，背景简洁，不分栏，不添加标题区、说明区、侧边栏、图例、标签、公式或任何可读字符。若原要求包含来源原文，只理解其视觉主题，不得把原文画进图片。\n\n${sourceFreePrompt}`
+}
+
 function cachePath(projectPath: string, fingerprint: string): string {
   return `${projectPath.replace(/[\\/]+$/, "")}/.llm-wiki/learning/visuals/${fingerprint}.png`
 }
 
 async function cacheFingerprint(input: { fingerprint: string; prompt: string; model: string; size: string }): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${input.fingerprint}\n${input.model}\n${input.size}\n${input.prompt}`))
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${TEACHING_IMAGE_POLICY_VERSION}\n${input.fingerprint}\n${input.model}\n${input.size}\n${input.prompt}`))
   return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("")
 }
 
@@ -84,7 +92,8 @@ export async function generateTeachingImage(input: {
   config: TeachingImageConfig
   signal?: AbortSignal
 }): Promise<string> {
-  const path = cachePath(input.projectPath, await cacheFingerprint({ fingerprint: input.fingerprint, prompt: input.prompt, model: input.config.model, size: input.config.size }))
+  const prompt = enforcePureVisualPrompt(input.prompt)
+  const path = cachePath(input.projectPath, await cacheFingerprint({ fingerprint: input.fingerprint, prompt, model: input.config.model, size: input.config.size }))
   if (await fileExists(path)) {
     const cached = await readFileAsBase64(path)
     return `data:${cached.mimeType};base64,${cached.base64}`
@@ -100,19 +109,19 @@ export async function generateTeachingImage(input: {
     ? {
         model: input.config.model.trim(),
         input: {
-          messages: [{ role: "user", content: [{ text: input.prompt }] }],
+          messages: [{ role: "user", content: [{ text: prompt }] }],
         },
         parameters: {
           size: input.config.size.replace("x", "*"),
           n: 1,
           prompt_extend: false,
           watermark: false,
-          negative_prompt: "文字，中文，英文，数字，公式，标题，说明，标签，水印，卡片，表格，笔记，思维导图，流程图，关系图，信息图，网页，软件界面，截图，排版海报",
+          negative_prompt: NO_TEXT_NEGATIVE_PROMPT,
         },
       }
     : {
         model: input.config.model.trim(),
-        prompt: input.prompt,
+        prompt,
         size: input.config.size,
         output_format: "png",
       }

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { DEFAULT_TEACHING_IMAGE_CONFIG, generateTeachingImage } from "./teaching-image"
+import { DEFAULT_TEACHING_IMAGE_CONFIG, enforcePureVisualPrompt, generateTeachingImage } from "./teaching-image"
 
 const mocks = vi.hoisted(() => ({
   exists: false,
@@ -25,6 +25,13 @@ describe("teaching image generation", () => {
     expect(mocks.fetch).not.toHaveBeenCalled()
   })
 
+  it("removes source prose and forces one text-free scene before generation", () => {
+    const prompt = enforcePureVisualPrompt("画一个并联电路。来源依据：这里是很长的教材定义和公式。")
+    expect(prompt).toContain("单一形象画面")
+    expect(prompt).toContain("画一个并联电路")
+    expect(prompt).not.toContain("教材定义和公式")
+  })
+
   it("refuses to generate when the user has not enabled image generation", async () => {
     await expect(generateTeachingImage({ projectPath: "C:/project", fingerprint: "source", prompt: "diagram", config: DEFAULT_TEACHING_IMAGE_CONFIG })).rejects.toThrow("尚未开启")
   })
@@ -38,6 +45,7 @@ describe("teaching image generation", () => {
       size: "1536x1024",
       output_format: "png",
     })
+    expect(JSON.parse(mocks.fetch.mock.calls[0][1].body).prompt).toContain("单一形象画面")
     expect(mocks.write).toHaveBeenCalledWith(expect.stringContaining("/.llm-wiki/learning/visuals/"), "new-image")
   })
 
@@ -68,17 +76,14 @@ describe("teaching image generation", () => {
     })
 
     expect(mocks.fetch.mock.calls[0][0]).toBe("https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation")
-    expect(JSON.parse(mocks.fetch.mock.calls[0][1].body)).toEqual({
+    const qwenBody = JSON.parse(mocks.fetch.mock.calls[0][1].body)
+    expect(qwenBody).toMatchObject({
       model: "qwen-image-3.0",
-      input: { messages: [{ role: "user", content: [{ text: "并联电路知识关系图" }] }] },
-      parameters: {
-        size: "1536*1024",
-        n: 1,
-        prompt_extend: false,
-        watermark: false,
-        negative_prompt: "文字，中文，英文，数字，公式，标题，说明，标签，水印，卡片，表格，笔记，思维导图，流程图，关系图，信息图，网页，软件界面，截图，排版海报",
-      },
+      parameters: { size: "1536*1024", n: 1, prompt_extend: false, watermark: false },
     })
+    expect(qwenBody.input.messages[0].content[0].text).toContain("单一形象画面")
+    expect(qwenBody.parameters.negative_prompt).toContain("教材页面")
+    expect(qwenBody.parameters.negative_prompt).toContain("二维码")
     expect(mocks.fetch.mock.calls[1][0]).toBe("https://example.com/qwen.png")
     expect(mocks.write).toHaveBeenCalledWith(expect.stringContaining("/.llm-wiki/learning/visuals/"), "AQID")
     expect(result).toBe("data:image/png;base64,AQID")
