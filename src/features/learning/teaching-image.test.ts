@@ -25,11 +25,13 @@ describe("teaching image generation", () => {
     expect(mocks.fetch).not.toHaveBeenCalled()
   })
 
-  it("removes source prose and forces one text-free scene before generation", () => {
-    const prompt = enforcePureVisualPrompt("画一个并联电路。来源依据：这里是很长的教材定义和公式。")
-    expect(prompt).toContain("单一形象画面")
-    expect(prompt).toContain("画一个并联电路")
+  it("reduces an old detailed prompt to one minimal drawable scene", () => {
+    const prompt = enforcePureVisualPrompt("只生成教学插图。画面只需要直观看出：一节电池分出两条支路，每条各接一只灯泡。根据知识补充细节。来源依据：这里是很长的教材定义和公式。")
+    expect(prompt).toContain("极简概念形象图")
+    expect(prompt).toContain("一节电池分出两条支路，每条各接一只灯泡")
+    expect(prompt).not.toContain("根据知识补充细节")
     expect(prompt).not.toContain("教材定义和公式")
+    expect(prompt.length).toBeLessThan(120)
   })
 
   it("refuses to generate when the user has not enabled image generation", async () => {
@@ -45,7 +47,7 @@ describe("teaching image generation", () => {
       size: "1536x1024",
       output_format: "png",
     })
-    expect(JSON.parse(mocks.fetch.mock.calls[0][1].body).prompt).toContain("单一形象画面")
+    expect(JSON.parse(mocks.fetch.mock.calls[0][1].body).prompt).toContain("极简概念形象图")
     expect(mocks.write).toHaveBeenCalledWith(expect.stringContaining("/.llm-wiki/learning/visuals/"), "new-image")
   })
 
@@ -81,9 +83,11 @@ describe("teaching image generation", () => {
       model: "qwen-image-3.0",
       parameters: { size: "1536*1024", n: 1, prompt_extend: false, watermark: false },
     })
-    expect(qwenBody.input.messages[0].content[0].text).toContain("单一形象画面")
+    expect(qwenBody.input.messages[0].content[0].text).toContain("极简概念形象图")
+    expect(qwenBody.input.messages[0].content[0].text).not.toContain("知识关系图")
     expect(qwenBody.parameters.negative_prompt).toContain("教材页面")
     expect(qwenBody.parameters.negative_prompt).toContain("二维码")
+    expect(qwenBody.parameters.negative_prompt).toContain("复杂装置")
     expect(mocks.fetch.mock.calls[1][0]).toBe("https://example.com/qwen.png")
     expect(mocks.write).toHaveBeenCalledWith(expect.stringContaining("/.llm-wiki/learning/visuals/"), "AQID")
     expect(result).toBe("data:image/png;base64,AQID")

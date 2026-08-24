@@ -56,12 +56,12 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()).slice(0, 8) : []
 }
 
-function parseVisual(value: unknown, field: string, cacheFingerprint: string, context: TeachingContext): TeachingVisualBrief {
+function parseVisual(value: unknown, field: string, cacheFingerprint: string): TeachingVisualBrief {
   const visual = value && typeof value === "object" ? value as Record<string, unknown> : {}
   const focus = typeof visual.focus === "string" ? visual.focus.trim() : ""
-  const form = typeof visual.form === "string" ? visual.form.trim() : "清晰教学示意图"
-  const kind = visual.kind === "image" ? "image" : "none"
-  const generatedPrompt = `只生成一幅铺满画面的单一形象插图，不是教学海报、教材页面或知识总结。需要用画面表现的知识主题是“${context.node.title}”，但不得在图片中写出主题名称。概念本质：${context.node.essence}。视觉形式：${form}。画面只需要直观看出：${focus || context.node.essence}。根据知识本身选择真实、准确的对象、结构、装置、现象或变化；电路只画必要的电源、导线、开关、用电器和电流路径；数学只画无文字坐标轴、曲线、几何形状或数量关系。构图要求：一个连续场景或一个居中的主体，背景简洁，主体占据主要画面，不分栏，不留说明区。禁止出现任何可读文字或类似文字的符号，包括中文、英文、数字、公式、标题、说明、标签、水印和二维码；禁止侧边栏、知识卡片、表格、笔记、思维导图、流程图、关系图、信息图、网页、软件界面和排版海报。需要标签才能表达的内容直接省略标签。只能表现概念本身，不补造结构、步骤、因果或数据。`
+  const form = typeof visual.form === "string" ? visual.form.trim() : "形象图"
+  const kind = visual.kind === "image" && focus ? "image" : "none"
+  const generatedPrompt = `核心画面：${focus}。视觉形式：${form}。`
   const imagePrompt = kind === "image" ? generatedPrompt : undefined
   return {
     kind,
@@ -105,7 +105,7 @@ function parseLesson(raw: string, context: TeachingContext): TeachingLesson {
     counterexample: conciseStringValue(value.counterexample, "反例或边界", 70),
     relationshipExplanation: conciseStringValue(value.relationshipExplanation, "串联关系说明", 80),
     checkQuestion: conciseStringValue(value.checkQuestion, "检查题", 60),
-    conceptVisual: parseVisual(value.conceptVisual, "概念形象图", `${context.sourceFingerprint}-concept-pure-visual-v4`, context),
+    conceptVisual: parseVisual(value.conceptVisual, "概念形象图", `${context.sourceFingerprint}-concept-minimal-visual-v5`),
     relationshipVisual: {
       kind: "none",
       title: "知识关系",
@@ -122,7 +122,7 @@ export async function prepareTeachingLesson(context: TeachingContext, signal?: A
 
 严格控制长度：essence 不超过 36 个汉字；explanation 不超过 90 个汉字，只说“是什么”；mechanism 不超过 70 个汉字，只说“为什么”；example 和 counterexample 各不超过 70 个汉字且只给一个；relationshipExplanation 不超过 80 个汉字；checkQuestion 不超过 60 个汉字。每项先说结论，不写开场、总结或重复句。
 
-category 是并列，绝不能写成先后；process 才是实际顺序；prerequisite 只是理解依赖。没有已审核精华串时，relationshipExplanation 只写“暂无可靠知识关联”，不要臆造关系。只允许生成一张帮助看见概念的形象图片：生物用结构或生命现象，物理和化学用物体、装置、现象或变化，数学用曲线、形状和空间数量关系，抽象概念用具体场景或对比。禁止让图片承载文字讲义、公式笔记、知识卡片、表格、思维导图、流程图、关系图或信息图；无法脱离文字表达的概念选择 none。知识关系只用精华串展示，不生成关系图片。不要安排回忆、迁移、复习或延迟任务。
+category 是并列，绝不能写成先后；process 才是实际顺序；prerequisite 只是理解依赖。没有已审核精华串时，relationshipExplanation 只写“暂无可靠知识关联”，不要臆造关系。只允许生成一张帮助看见概念的极简形象图片。conceptVisual.focus 不超过 45 个汉字，只写能够直接画出来的必要对象及其关系，不写知识名称、定义、解释、文字内容或装饰。例如并联电路写“一节电池分出两条独立支路，每条支路各连接一只点亮的灯泡”。删除后仍不影响识别概念的对象一律不要写。生物用一个结构或生命现象，物理和化学用最少的物体、装置或变化，数学用一组曲线、形状或空间数量关系；无法脱离文字表达的概念选择 none。知识关系只用精华串展示，不生成关系图片。不要安排回忆、迁移、复习或延迟任务。
 
 返回且只返回 JSON：{"essence":"一句最短本质","relationshipExplanation":"精华串关系和当前知识的作用","explanation":"是什么","mechanism":"为什么","example":"一个正例","counterexample":"一个反例及不成立原因","checkQuestion":"一道轻量检验题","conceptVisual":{"kind":"image|none","title":"概念形象图","form":"形象结构图|现象场景图|过程变化图|空间关系图|对比图|数量关系图","focus":"不靠文字也必须看出的关键点","reason":"为什么适合或不适合用形象图"}}。` },
     { role: "user", content: contextText(context) },

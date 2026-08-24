@@ -17,12 +17,22 @@ export const DEFAULT_TEACHING_IMAGE_CONFIG: TeachingImageConfig = {
   size: "1536x1024",
 }
 
-const TEACHING_IMAGE_POLICY_VERSION = "pure-visual-v2"
-const NO_TEXT_NEGATIVE_PROMPT = "文字，中文，英文，字母，数字，公式，标题，说明，注释，标签，图例，水印，二维码，页眉，页脚，侧边栏，卡片，表格，笔记，思维导图，流程图，关系图，信息图，网页，软件界面，截图，教材页面，排版海报"
+const TEACHING_IMAGE_POLICY_VERSION = "minimal-visual-v3"
+const NO_TEXT_NEGATIVE_PROMPT = "文字，中文，英文，字母，数字，乱码，公式，标题，说明，注释，标签，图例，水印，二维码，页眉，页脚，侧边栏，卡片，表格，笔记，思维导图，流程图，关系图，信息图，网页，软件界面，截图，教材页面，排版海报，复杂装置，多余物体，多画面，分栏"
+
+function extractCoreScene(prompt: string): string {
+  const sourceFreePrompt = prompt.split("来源依据：", 1)[0].trim()
+  const markedScene = sourceFreePrompt.match(/(?:核心画面|画面只需要直观看出)[:：]\s*([^。\n]{1,100})/u)?.[1]?.trim()
+  const firstSentence = sourceFreePrompt.split(/[。\n]/u).find((part) => part.trim())?.trim() ?? ""
+  const scene = (markedScene || firstSentence)
+    .replace(/知识关系图|关系图|信息图|思维导图|流程图|教学海报|排版海报|教材页面/gu, "")
+    .trim()
+  return Array.from(scene).slice(0, 100).join("")
+}
 
 export function enforcePureVisualPrompt(prompt: string): string {
-  const sourceFreePrompt = prompt.split("来源依据：", 1)[0].trim()
-  return `只输出一幅无文字的单一形象画面。不要制作教学海报、教材页面、知识总结或带说明的示意板。画面必须是一个连续场景或一个主体，铺满画面，背景简洁，不分栏，不添加标题区、说明区、侧边栏、图例、标签、公式或任何可读字符。若原要求包含来源原文，只理解其视觉主题，不得把原文画进图片。\n\n${sourceFreePrompt}`
+  const scene = extractCoreScene(prompt)
+  return `极简概念形象图：${scene}。只保留表现核心概念不可缺少的对象和关系。单一场景，主体清楚，干净背景，纯图像，无文字无标注。`
 }
 
 function cachePath(projectPath: string, fingerprint: string): string {
