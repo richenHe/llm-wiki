@@ -15,7 +15,7 @@
 //! ordering, same `index` per image), so the dedup cache in Phase 3
 //! can key purely on the SHA-256 of `data_base64`.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
@@ -1097,6 +1097,100 @@ pub async fn get_pdf_page_count_cmd(path: String) -> Result<u32, String> {
     .map_err(|e| format!("get_pdf_page_count blocking task join error: {e}"))?
 }
 
+/// Copy a one-based inclusive page range into a standalone PDF. The source is
+/// opened read-only and the destination is replaced only after PDFium has
+/// produced a complete temporary file.
+fn checked_pdf_page_range(
+    start_page: u32,
+    end_page: u32,
+    total_pages: u32,
+) -> Result<std::ops::RangeInclusive<i32>, String> {
+    if start_page == 0 || end_page < start_page {
+        return Err(format!(
+            "Invalid PDF page range {start_page}-{end_page}; pages start at 1"
+        ));
+    }
+    if end_page > total_pages {
+        return Err(format!(
+            "PDF page range {start_page}-{end_page} exceeds the {total_pages}-page source"
+        ));
+    }
+    Ok((start_page - 1) as i32..=(end_page - 1) as i32)
+}
+
+#[tauri::command]
+pub async fn split_pdf_range_cmd(
+    source_path: String,
+    destination_path: String,
+    start_page: u32,
+    end_page: u32,
+) -> Result<u32, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::panic_guard::run_guarded("split_pdf_range", || {
+            let source = Path::new(&source_path);
+            let destination = Path::new(&destination_path);
+            if source == destination {
+                return Err("PDF split destination must differ from the source".to_string());
+            }
+            let parent = destination.parent().ok_or_else(|| {
+                format!("PDF split destination has no parent: '{destination_path}'")
+            })?;
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create PDF split directory '{}': {e}",
+                    parent.display()
+                )
+            })?;
+
+            let _guard = crate::commands::fs::lock_pdfium();
+            let pdfium = crate::commands::fs::pdfium()?;
+            let document = pdfium
+                .load_pdf_from_file(source, None)
+                .map_err(|e| format!("Failed to open PDF '{source_path}': {e}"))?;
+            let total_pages = document.pages().len() as u32;
+            let page_range = checked_pdf_page_range(start_page, end_page, total_pages)?;
+
+            let mut split = pdfium
+                .create_new_pdf()
+                .map_err(|e| format!("Failed to create split PDF: {e}"))?;
+            split
+                .pages_mut()
+                .copy_page_range_from_document(&document, page_range, 0)
+                .map_err(|e| format!("Failed to copy PDF pages {start_page}-{end_page}: {e}"))?;
+
+            let temp_path = parent.join(format!(
+                ".{}.{}.tmp",
+                destination
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("split.pdf"),
+                uuid::Uuid::new_v4()
+            ));
+            let save_result = split.save_to_file(&temp_path).map_err(|e| {
+                format!("Failed to save split PDF pages {start_page}-{end_page}: {e}")
+            });
+            if let Err(error) = save_result {
+                let _ = fs::remove_file(&temp_path);
+                return Err(error);
+            }
+            if destination.exists() {
+                fs::remove_file(destination).map_err(|e| {
+                    let _ = fs::remove_file(&temp_path);
+                    format!("Failed to replace cached split PDF '{destination_path}': {e}")
+                })?;
+            }
+            fs::rename(&temp_path, destination).map_err(|e| {
+                let _ = fs::remove_file(&temp_path);
+                format!("Failed to finalize split PDF '{destination_path}': {e}")
+            })?;
+
+            Ok(end_page - start_page + 1)
+        })
+    })
+    .await
+    .map_err(|e| format!("split_pdf_range blocking task join error: {e}"))?
+}
+
 #[tauri::command]
 pub async fn extract_office_images_cmd(path: String) -> Result<Vec<ExtractedImage>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -1270,5 +1364,61 @@ mod tests {
         assert!(!should_skip_full_page_image_decision(true, false, true));
         assert!(!should_skip_full_page_image_decision(true, true, false));
         assert!(!should_skip_full_page_image_decision(false, false, false));
+    }
+
+    #[test]
+    fn checked_pdf_page_range_converts_one_based_pages_to_pdfium_indexes() {
+        assert_eq!(checked_pdf_page_range(1, 180, 450).unwrap(), 0..=179);
+        assert_eq!(checked_pdf_page_range(361, 450, 450).unwrap(), 360..=449);
+    }
+
+    #[test]
+    fn checked_pdf_page_range_rejects_invalid_or_missing_pages() {
+        assert!(checked_pdf_page_range(0, 1, 10).is_err());
+        assert!(checked_pdf_page_range(5, 4, 10).is_err());
+        assert!(checked_pdf_page_range(1, 11, 10).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn pdfium_can_copy_and_reopen_a_page_range() {
+        use pdfium_render::prelude::PdfPagePaperSize;
+
+        let pdfium_dll = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("pdfium")
+            .join("pdfium.dll");
+        assert!(pdfium_dll.exists(), "test PDFium DLL is missing");
+        std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", &pdfium_dll);
+        let test_dir =
+            std::env::temp_dir().join(format!("llmwiki-pdf-split-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).unwrap();
+        let source_path = test_dir.join("source.pdf");
+        let split_path = test_dir.join("split.pdf");
+
+        {
+            let _guard = crate::commands::fs::lock_pdfium();
+            let pdfium = crate::commands::fs::pdfium().unwrap();
+            let mut source = pdfium.create_new_pdf().unwrap();
+            for _ in 0..3 {
+                source
+                    .pages_mut()
+                    .create_page_at_end(PdfPagePaperSize::a4())
+                    .unwrap();
+            }
+            source.save_to_file(&source_path).unwrap();
+
+            let reopened = pdfium.load_pdf_from_file(&source_path, None).unwrap();
+            let mut split = pdfium.create_new_pdf().unwrap();
+            split
+                .pages_mut()
+                .copy_page_range_from_document(&reopened, 1..=2, 0)
+                .unwrap();
+            split.save_to_file(&split_path).unwrap();
+
+            let verified = pdfium.load_pdf_from_file(&split_path, None).unwrap();
+            assert_eq!(verified.pages().len(), 2);
+        }
+
+        fs::remove_dir_all(test_dir).unwrap();
     }
 }

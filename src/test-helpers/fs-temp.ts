@@ -81,6 +81,29 @@ export const realFs = {
       () => false,
     )
   },
+  getFileSize: async (p: string): Promise<number> => {
+    return (await fs.stat(p)).size
+  },
+  getFileModifiedTime: async (p: string): Promise<number> => {
+    return (await fs.stat(p)).mtimeMs
+  },
+  getPdfPageCount: async (p: string): Promise<number> => {
+    const fixture = await fs.readFile(p, "utf-8")
+    const match = fixture.match(/^PAGES:(\d+)/)
+    if (!match) throw new Error("Test PDF fixture has no PAGES marker")
+    return Number.parseInt(match[1], 10)
+  },
+  splitPdfRange: async (
+    _sourcePath: string,
+    destinationPath: string,
+    startPage: number,
+    endPage: number,
+  ): Promise<number> => {
+    const pageCount = endPage - startPage + 1
+    await fs.mkdir(path.dirname(destinationPath), { recursive: true })
+    await fs.writeFile(destinationPath, `PAGES:${pageCount}\n`, "utf-8")
+    return pageCount
+  },
   findRelatedWikiPages: async (): Promise<string[]> => {
     return []
   },

@@ -146,6 +146,23 @@ export async function getPdfPageCount(path: string): Promise<number> {
   return invoke<number>("get_pdf_page_count_cmd", { path })
 }
 
+/** Copy a one-based inclusive page range into a standalone PDF. */
+export async function splitPdfRange(
+  sourcePath: string,
+  destinationPath: string,
+  startPage: number,
+  endPage: number,
+): Promise<number> {
+  assertAbsoluteFsPath("splitPdfRange source", sourcePath)
+  assertAbsoluteFsPath("splitPdfRange destination", destinationPath)
+  return invoke<number>("split_pdf_range_cmd", {
+    sourcePath,
+    destinationPath,
+    startPage,
+    endPage,
+  })
+}
+
 export interface FileHistoryEntry {
   id: string
   path: string

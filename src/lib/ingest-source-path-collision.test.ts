@@ -1199,6 +1199,87 @@ describe("autoIngest source summary paths", () => {
     expect(mockStreamChat).not.toHaveBeenCalled()
   })
 
+  it("resumes a split PDF from the failed MinerU batch and merges all pages once", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    const sourcePath = `${tmp.path}/raw/sources/project-a/large-report.pdf`
+    await writeFileRaw(sourcePath, "PAGES:450\n")
+    useWikiStore.setState({
+      mineruConfig: {
+        enabled: true,
+        token: "mineru-token",
+        modelVersion: "vlm",
+      },
+    })
+    mockParseWithMineru
+      .mockResolvedValueOnce({
+        markdown: "first batch",
+        savedImages: [],
+        processedPageCount: 180,
+      })
+      .mockRejectedValueOnce(new Error("temporary second-batch failure"))
+
+    await expect(autoIngest(
+      tmp.path,
+      sourcePath,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+    )).rejects.toThrow("temporary second-batch failure")
+    expect(mockStreamChat).not.toHaveBeenCalled()
+
+    sourceMarkers = ["merged 450-page source"]
+    mockParseWithMineru
+      .mockResolvedValueOnce({
+        markdown: "second batch",
+        savedImages: [],
+        processedPageCount: 180,
+      })
+      .mockResolvedValueOnce({
+        markdown: "third batch",
+        savedImages: [],
+        processedPageCount: 90,
+      })
+
+    await autoIngest(
+      tmp.path,
+      sourcePath,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+    )
+
+    expect(mockParseWithMineru).toHaveBeenCalledTimes(4)
+    expect(mockParseWithMineru.mock.calls.map((call) => String(call[1]))).toEqual([
+      expect.stringContaining("pages-000001-000180.pdf"),
+      expect.stringContaining("pages-000181-000360.pdf"),
+      expect.stringContaining("pages-000181-000360.pdf"),
+      expect.stringContaining("pages-000361-000450.pdf"),
+    ])
+    const mergedCache = path.join(
+      tmp.path,
+      "raw",
+      "sources",
+      "project-a",
+      ".cache",
+      "mineru",
+      "large-report.pdf.md",
+    )
+    const merged = await fs.readFile(mergedCache, "utf-8")
+    expect(merged).toContain("source-pages=1-180")
+    expect(merged).toContain("source-pages=181-360")
+    expect(merged).toContain("source-pages=361-450")
+    await expect(fs.access(path.join(
+      tmp.path,
+      "raw",
+      "sources",
+      "project-a",
+      ".cache",
+      "mineru",
+      "large-report.pdf.md.parts",
+      "pages-000001-000180.pdf",
+    ))).rejects.toThrow()
+  })
+
   it("uses a configured local MinerU backend without a cloud token", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["local mineru source"]

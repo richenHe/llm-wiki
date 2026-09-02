@@ -682,6 +682,7 @@ pub fn run() {
             commands::codex_cli::codex_cli_kill,
             commands::extract_images::extract_pdf_images_cmd,
             commands::extract_images::get_pdf_page_count_cmd,
+            commands::extract_images::split_pdf_range_cmd,
             commands::extract_images::extract_office_images_cmd,
             commands::extract_images::extract_and_save_pdf_images_cmd,
             commands::extract_images::render_and_save_pdf_pages_cmd,

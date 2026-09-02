@@ -12,7 +12,7 @@ import {
   listDirectory,
 } from "@/commands/fs"
 import { streamChat, type StreamCompletion } from "@/lib/llm-client"
-import type { LlmConfig } from "@/stores/wiki-store"
+import type { LlmConfig, MineruConfig } from "@/stores/wiki-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { parseWithMineruResult } from "@/lib/mineru"
 import { useChatStore } from "@/stores/chat-store"
@@ -75,6 +75,14 @@ import {
 } from "@/lib/ingest-generation-checkpoint"
 import { IngestNeedsAttentionError, IngestQueuePauseError } from "@/lib/ingest-errors"
 import { sourceCachePaths } from "@/lib/source-cache-paths"
+import {
+  mergeMineruBatchResults,
+  MINERU_BATCH_MAX_BYTES,
+  MINERU_BATCH_MAX_PAGES,
+  prepareMineruPdfParts,
+  type MineruBatchResult,
+  type MineruPdfPart,
+} from "@/lib/mineru-batch"
 
 const LONG_SOURCE_MIN_BUDGET = 8_000
 const LONG_SOURCE_MAX_SINGLE_PASS_BUDGET = 300_000
@@ -287,6 +295,205 @@ async function savedImagesFromMineruMarkdown(
     }
   }
   return images
+}
+
+interface MineruBatchManifestPart {
+  key: string
+  startPage: number
+  endPage: number
+  processedPageCount: number
+  imagePaths: string[]
+}
+
+interface MineruBatchManifest {
+  version: 1
+  extractionSignature: string
+  totalPages: number
+  parts: MineruBatchManifestPart[]
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return [...left].sort().join("\n") === [...right].sort().join("\n")
+}
+
+async function loadCachedMineruBatchResult(
+  projectPath: string,
+  sourceSummarySlug: string,
+  partsDir: string,
+  part: MineruPdfPart,
+  cached: MineruBatchManifestPart | undefined,
+): Promise<MineruBatchResult | null> {
+  if (
+    !cached
+    || cached.key !== part.key
+    || cached.startPage !== part.startPage
+    || cached.endPage !== part.endPage
+    || cached.processedPageCount !== part.endPage - part.startPage + 1
+  ) return null
+  const markdown = await tryReadFile(`${partsDir}/${part.key}.md`)
+  if (!markdown.trim()) return null
+  const savedImages = await savedImagesFromMineruMarkdown(
+    projectPath,
+    sourceSummarySlug,
+    markdown,
+  )
+  if (!sameStringSet(cached.imagePaths, savedImages.map((image) => image.relPath))) return null
+  return {
+    part,
+    markdown,
+    savedImages,
+    processedPageCount: cached.processedPageCount,
+  }
+}
+
+async function parsePdfWithMineruBatches(params: {
+  config: MineruConfig
+  sourcePath: string
+  projectPath: string
+  sourceSummarySlug: string
+  sourcePageCount: number
+  extractionSignature: string
+  partsDir: string
+  signal?: AbortSignal
+  onProgress: (message: string) => void
+}): Promise<{ markdown: string; savedImages: SavedImage[]; processedPageCount: number }> {
+  const manifestPath = `${params.partsDir}/manifest.json`
+  let manifest: MineruBatchManifest | null = null
+  const rawManifest = await tryReadFile(manifestPath)
+  if (rawManifest.trim()) {
+    try {
+      const parsed = JSON.parse(rawManifest) as MineruBatchManifest
+      if (
+        parsed.version === 1
+        && parsed.extractionSignature === params.extractionSignature
+        && parsed.totalPages === params.sourcePageCount
+        && Array.isArray(parsed.parts)
+      ) manifest = parsed
+    } catch {
+      // An invalid manifest is treated as a cache miss.
+    }
+  }
+
+  const cachedByKey = new Map((manifest?.parts ?? []).map((part) => [part.key, part]))
+  const cachedParts = (manifest?.parts ?? []).map((part) => ({
+    startPage: part.startPage,
+    endPage: part.endPage,
+    key: part.key,
+    path: `${params.partsDir}/${part.key}.pdf`,
+  }))
+  if (cachedParts.length > 0) {
+    const cachedResults: MineruBatchResult[] = []
+    for (const part of cachedParts) {
+      const cachedResult = await loadCachedMineruBatchResult(
+        params.projectPath,
+        params.sourceSummarySlug,
+        params.partsDir,
+        part,
+        cachedByKey.get(part.key),
+      )
+      if (!cachedResult) break
+      cachedResults.push(cachedResult)
+    }
+    if (cachedResults.length === cachedParts.length) {
+      try {
+        const merged = mergeMineruBatchResults(cachedResults, params.sourcePageCount)
+        params.onProgress(`Reused ${cachedResults.length} verified MinerU PDF batches`)
+        return merged
+      } catch {
+        // The manifest may describe an old or discontinuous plan; rebuild it.
+      }
+    }
+  }
+
+  const parts = await prepareMineruPdfParts(
+    params.sourcePath,
+    params.partsDir,
+    params.sourcePageCount,
+    {
+      reuseExisting: manifest !== null,
+      signal: params.signal,
+      onProgress: params.onProgress,
+    },
+  )
+  params.onProgress(
+    `PDF split into ${parts.length} MinerU batch(es); uploading them in page order`,
+  )
+  const results: MineruBatchResult[] = []
+  const completedManifestParts: MineruBatchManifestPart[] = []
+
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index]
+    const cachedResult = await loadCachedMineruBatchResult(
+      params.projectPath,
+      params.sourceSummarySlug,
+      params.partsDir,
+      part,
+      cachedByKey.get(part.key),
+    )
+    if (cachedResult) {
+      results.push(cachedResult)
+      completedManifestParts.push(cachedByKey.get(part.key)!)
+      params.onProgress(
+        `MinerU batch ${index + 1}/${parts.length} (pages ${part.startPage}-${part.endPage}) reused from verified cache`,
+      )
+      continue
+    }
+
+    const prefix = `MinerU batch ${index + 1}/${parts.length} (pages ${part.startPage}-${part.endPage})`
+    const parsed = await parseWithMineruResult(
+      params.config,
+      part.path,
+      undefined,
+      (message) => params.onProgress(`${prefix}: ${message}`),
+      params.signal,
+      {
+        projectPath: params.projectPath,
+        sourceSummarySlug: params.sourceSummarySlug,
+        assetNamespace: part.key,
+      },
+    )
+    const expectedPages = part.endPage - part.startPage + 1
+    if (parsed.processedPageCount !== expectedPages) {
+      const actual = parsed.processedPageCount === null ? "unknown" : parsed.processedPageCount
+      throw new Error(
+        `${prefix} covered ${actual}/${expectedPages} page(s); the partial result was not merged`,
+      )
+    }
+    const processedPageCount = parsed.processedPageCount
+    await writeFile(`${params.partsDir}/${part.key}.md`, parsed.markdown)
+    const manifestPart: MineruBatchManifestPart = {
+      key: part.key,
+      startPage: part.startPage,
+      endPage: part.endPage,
+      processedPageCount,
+      imagePaths: parsed.savedImages.map((image) => image.relPath),
+    }
+    results.push({
+      part,
+      markdown: parsed.markdown,
+      savedImages: parsed.savedImages,
+      processedPageCount,
+    })
+    completedManifestParts.push(manifestPart)
+    await writeFile(manifestPath, JSON.stringify({
+      version: 1,
+      extractionSignature: params.extractionSignature,
+      totalPages: params.sourcePageCount,
+      parts: completedManifestParts,
+    } satisfies MineruBatchManifest, null, 2))
+  }
+
+  const merged = mergeMineruBatchResults(results, params.sourcePageCount)
+  for (const part of parts) {
+    try {
+      await deleteFile(part.path)
+    } catch {
+      // Parsed Markdown and images are complete; a locked temporary split can
+      // remain in the cache and will be cleaned when the source is deleted.
+    }
+  }
+  params.onProgress(`Merged ${parts.length} MinerU batches into one complete PDF result`)
+  return merged
 }
 
 function stripWikiMediaAbsPaths(projectPath: string, content: string): string {
@@ -871,12 +1078,14 @@ async function autoIngestImpl(
   // only when the source, processing configuration, generated pages, and
   // recorded media artifacts all still match the previous complete ingest.
   let sourceCacheMaterial = builtinSourceContent
+  let sourcePdfSize: number | null = null
   if (isPdf) {
     try {
       const [size, modified] = await Promise.all([
         getFileSize(sp),
         getFileModifiedTime(sp),
       ])
+      sourcePdfSize = size
       sourceCacheMaterial = `pdf:${size}:${modified}`
     } catch {
       sourceCacheMaterial = builtinSourceContent
@@ -937,7 +1146,7 @@ async function autoIngestImpl(
       const cachePath = cachePaths.mineruMarkdown
       const cacheMetaPath = cachePaths.mineruMetadata
       const extractionSignature = JSON.stringify({
-        version: 2,
+        version: 3,
         source: sourceCacheMaterial,
         backend: mineruCfg.backend ?? "cloud",
         model: mineruCfg.modelVersion ?? "pipeline",
@@ -980,12 +1189,30 @@ async function autoIngestImpl(
       if (!mineruSucceeded) {
         activity.updateItem(activityId, { detail: "MinerU: parsing PDF..." })
         console.log(`[ingest:mineru] submitting "${fileName}" to MinerU API`)
-        const mineruResult = await parseWithMineruResult(mineruCfg, sp, undefined, (msg) => {
-          activity.updateItem(activityId, { detail: `MinerU: ${msg}` })
-        }, signal, {
-          projectPath: pp,
-          sourceSummarySlug,
-        })
+        const needsBatching = sourcePageCount !== null && (
+          sourcePageCount > MINERU_BATCH_MAX_PAGES
+          || (sourcePdfSize !== null && sourcePdfSize > MINERU_BATCH_MAX_BYTES)
+        )
+        const mineruResult = needsBatching
+          ? await parsePdfWithMineruBatches({
+              config: mineruCfg,
+              sourcePath: sp,
+              projectPath: pp,
+              sourceSummarySlug,
+              sourcePageCount: sourcePageCount!,
+              extractionSignature,
+              partsDir: cachePaths.mineruParts,
+              signal,
+              onProgress: (msg) => {
+                activity.updateItem(activityId, { detail: `MinerU: ${msg}` })
+              },
+            })
+          : await parseWithMineruResult(mineruCfg, sp, undefined, (msg) => {
+              activity.updateItem(activityId, { detail: `MinerU: ${msg}` })
+            }, signal, {
+              projectPath: pp,
+              sourceSummarySlug,
+            })
         await createDirectory(cachePath.substring(0, cachePath.lastIndexOf("/")))
         await writeFile(cachePath, mineruResult.markdown)
         await writeFile(cacheMetaPath, JSON.stringify({

@@ -80,6 +80,8 @@ interface UploadUrlResponse {
 interface MineruAssetOptions {
   projectPath: string
   sourceSummarySlug: string
+  /** Stable subdirectory used to keep images from separate PDF batches apart. */
+  assetNamespace?: string
 }
 
 interface MineruExtractedMarkdown {
@@ -305,13 +307,22 @@ function isMineruImagePath(path: string): boolean {
   return MINERU_IMAGE_EXTS.has(ext)
 }
 
-function mineruAssetRelPath(sourceSummarySlug: string, zipPath: string): string {
+function mineruAssetRootRelPath(options: MineruAssetOptions): string {
+  const namespace = options.assetNamespace?.trim()
+  if (!namespace) return `media/${options.sourceSummarySlug}/mineru`
+  if (!/^[a-z0-9][a-z0-9-]*$/i.test(namespace)) {
+    throw new Error(`Invalid MinerU asset namespace: ${namespace}`)
+  }
+  return `media/${options.sourceSummarySlug}/mineru/${namespace}`
+}
+
+function mineruAssetRelPath(options: MineruAssetOptions, zipPath: string): string {
   const safeParts = normalizeMineruZipPath(zipPath)
     .split("/")
     .map(safeMineruAssetSegment)
     .filter(Boolean)
   const safePath = safeParts.length > 0 ? safeParts.join("/") : "image.png"
-  return `media/${sourceSummarySlug}/mineru/${safePath}`
+  return `${mineruAssetRootRelPath(options)}/${safePath}`
 }
 
 function isExternalOrDataUrl(url: string): boolean {
@@ -710,7 +721,7 @@ async function saveMineruZipImages(
   signal?: AbortSignal,
 ): Promise<{ pathMap: Map<string, string>; savedImages: SavedImage[] }> {
   const pp = normalizePath(options.projectPath)
-  const rootDir = `${pp}/wiki/media/${options.sourceSummarySlug}/mineru`
+  const rootDir = `${pp}/wiki/${mineruAssetRootRelPath(options)}`
   const pathMap = new Map<string, string>()
   const savedImages: SavedImage[] = []
   const imageEntries: Array<[string, JSZip.JSZipObject]> = []
@@ -730,7 +741,7 @@ async function saveMineruZipImages(
   await createDirectory(rootDir)
   for (const [zipPath, file] of imageEntries) {
     throwIfAborted(signal)
-    const relPath = mineruAssetRelPath(options.sourceSummarySlug, zipPath)
+    const relPath = mineruAssetRelPath(options, zipPath)
     const absPath = `${pp}/wiki/${relPath}`
     const bytes = await file.async("uint8array")
     await writeFileBase64(absPath, bytesToBase64(bytes))
@@ -961,7 +972,8 @@ async function parseWithLocalMineru(
       const savedImages: SavedImage[] = []
       const pathMap = new Map<string, string>()
       if (assetOptions && first.images && typeof first.images === "object") {
-        const mediaDir = `${normalizePath(assetOptions.projectPath)}/wiki/media/${assetOptions.sourceSummarySlug}/mineru/images`
+        const assetRoot = mineruAssetRootRelPath(assetOptions)
+        const mediaDir = `${normalizePath(assetOptions.projectPath)}/wiki/${assetRoot}/images`
         await createDirectory(mediaDir)
         for (const [rawName, rawData] of Object.entries(first.images)) {
           throwIfAborted(signal)
@@ -981,7 +993,7 @@ async function parseWithLocalMineru(
           // while retaining lookup entries for the original Markdown target.
           const safeName = `image-${savedImages.length + 1}.${extension}`
           const absPath = `${mediaDir}/${safeName}`
-          const relPath = `media/${assetOptions.sourceSummarySlug}/mineru/images/${safeName}`
+          const relPath = `${assetRoot}/images/${safeName}`
           await writeFileBase64(absPath, match[2])
           savedImages.push({
             index: savedImages.length,

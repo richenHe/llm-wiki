@@ -9,6 +9,7 @@ describe("sourceCachePaths", () => {
     expect(paths.previewText).toBe("D:/wiki/raw/sources/books/.cache/report.pdf.txt")
     expect(paths.mineruMarkdown).toBe("D:/wiki/raw/sources/books/.cache/mineru/report.pdf.md")
     expect(paths.mineruMetadata).toBe("D:/wiki/raw/sources/books/.cache/mineru/report.pdf.md.meta.json")
+    expect(paths.mineruParts).toBe("D:/wiki/raw/sources/books/.cache/mineru/report.pdf.md.parts")
     expect(paths.mineruMarkdown).not.toBe(paths.previewText)
   })
 

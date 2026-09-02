@@ -533,6 +533,40 @@ describe("parseWithMineru", () => {
     expect(result.savedImages[0]?.relPath).toBe("media/doc/mineru/images/image-1.png")
   })
 
+  it("keeps images from separate PDF batches in separate directories", async () => {
+    mockHttpFetch
+      .mockResolvedValueOnce(jsonResponse({ task_id: "task-1" }, { status: 202 }))
+      .mockResolvedValueOnce(jsonResponse({ status: "completed" }))
+      .mockResolvedValueOnce(jsonResponse({
+        results: {
+          doc: {
+            md_content: "![Chart](images/chart.png)",
+            images: { "chart.png": `data:image/png;base64,${btoa("image bytes")}` },
+          },
+        },
+      }))
+
+    const result = await parseWithMineruResult({
+      enabled: true,
+      backend: "local",
+      token: "",
+      modelVersion: "vlm",
+      localBackend: "hybrid-engine",
+    }, "/tmp/doc.pdf", undefined, undefined, undefined, {
+      projectPath: "/project",
+      sourceSummarySlug: "doc",
+      assetNamespace: "pages-000001-000180",
+    })
+
+    expect(result.markdown).toBe(
+      "![Chart](media/doc/mineru/pages-000001-000180/images/image-1.png)",
+    )
+    expect(fsMocks.writeFileBase64).toHaveBeenCalledWith(
+      "/project/wiki/media/doc/mineru/pages-000001-000180/images/image-1.png",
+      btoa("image bytes"),
+    )
+  })
+
   it("requires a model server URL for official HTTP-client backends", async () => {
     await expect(parseWithMineru({
       enabled: true,

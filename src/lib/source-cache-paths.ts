@@ -5,6 +5,7 @@ export interface SourceCachePaths {
   legacyMineruMetadata: string
   mineruMarkdown: string
   mineruMetadata: string
+  mineruParts: string
 }
 
 /**
@@ -25,5 +26,6 @@ export function sourceCachePaths(sourcePath: string): SourceCachePaths {
     legacyMineruMetadata: `${previewText}.meta.json`,
     mineruMarkdown,
     mineruMetadata: `${mineruMarkdown}.meta.json`,
+    mineruParts: `${mineruMarkdown}.parts`,
   }
 }

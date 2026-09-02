@@ -417,6 +417,7 @@ export async function deleteSourceFiles(
       cachePaths.legacyMineruMetadata,
       cachePaths.mineruMarkdown,
       cachePaths.mineruMetadata,
+      cachePaths.mineruParts,
     ]) {
       try {
         await deleteFile(cachePath)
